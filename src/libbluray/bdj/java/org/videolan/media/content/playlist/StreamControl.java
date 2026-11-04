@@ -117,6 +117,7 @@ public abstract class StreamControl implements Control {
             if (streams[i].getLang().equals(language)) {
                 try {
                     selectStreamNumber(i + 1);
+                    return;
                 } catch (StreamNotAvailableException e) {
                     throw new NotAuthorizedException();
                 }

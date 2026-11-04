@@ -920,8 +920,6 @@ static int _create_jvm(void *jvm_lib, const char *java_home, BDJ_CONFIG *cfg,
     option[n++].optionString = str_dup   ("-Xms256M");
     option[n++].optionString = str_dup   ("-Xmx256M");
     option[n++].optionString = str_dup   ("-Xss2048k");
-    option[n++].optionString = str_dup   ("-Djava.io.tmpdir=/storage/.kodi/userdata/addon_data/tools.jre.zulu");
-    BD_DEBUG(DBG_BDJ | DBG_CRIT, "Use /storage/.kodi/userdata/addon_data/tools.jre.zulu as cache dir.\n");
     option[n++].optionString = str_dup   ("-Djava.awt.headless=false");
     BD_DEBUG(DBG_CRIT | DBG_BDJ, "Disable X11 check\n");
 #ifdef HAVE_BDJ_J2ME
