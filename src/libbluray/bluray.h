@@ -749,6 +749,7 @@ typedef enum {
     BLURAY_PLAYER_SETTING_TEXT_CAP       = 30,    /**< Text Subtitle capability.    Bit mask. */
     BLURAY_PLAYER_SETTING_PLAYER_PROFILE = 31,    /**< Player profile and version. */
 
+    BLURAY_PLAYER_SETTING_DV_VIDEO_PREROLL     = 0x103, /**< Keep DV base-video decode references before IN. Default: disabled. Set before playback; client must suppress pictures outside the authored PTS window. */
     BLURAY_PLAYER_SETTING_DECODE_PG            = 0x100, /**< Enable/disable PG (subtitle) decoder. Integer. Default: disabled. */
     BLURAY_PLAYER_SETTING_PERSISTENT_STORAGE   = 0x101, /**< Enable/disable BD-J persistent storage. Integer. Default: enabled. */
     BLURAY_PLAYER_SETTING_UO_RESTRICTION_LEVEL = 0x102, /**< Set User Operations (UO) restriction mask enforcement level. bd_player_setting_uo_restriction_level value. Default: BLURAY_PLAYER_SETTING_UO_RESTRICTION_RELAXED. */
