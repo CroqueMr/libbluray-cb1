@@ -28,6 +28,7 @@
 
 #include "file/file.h"
 #include "util/logging.h"
+#include "util/macro.h"
 
 #include <stdio.h>  // SEEK_*
 
@@ -44,7 +45,7 @@ void bb_init( BITBUFFER *bb, const uint8_t *p_data, size_t i_data )
     bb->i_left  = 8;
 }
 
-static int _bs_read( BITSTREAM *bs)
+static BD_USED int _bs_read( BITSTREAM *bs)
 {
     int result = 0;
     int64_t got;
@@ -62,7 +63,7 @@ static int _bs_read( BITSTREAM *bs)
     return result;
 }
 
-static int _bs_read_at( BITSTREAM *bs, int64_t off )
+static BD_USED int _bs_read_at( BITSTREAM *bs, int64_t off )
 {
     if (file_seek(bs->fp, off, SEEK_SET) < 0) {
         BD_DEBUG(DBG_FILE | DBG_CRIT, "bs_read(): seek failed\n");
@@ -71,6 +72,19 @@ static int _bs_read_at( BITSTREAM *bs, int64_t off )
     }
     bs->pos = off;
     return _bs_read(bs);
+}
+
+static void _bs_refill( BITSTREAM *bs )
+{
+    int64_t pos = bs->pos + (bs->bb.p - bs->bb.p_start);
+    int left = bs->bb.i_left;
+
+    if (_bs_read_at(bs, pos) < 0) {
+        /* seek failed: treat as EOF */
+        bs->size = 0;
+        bb_init(&bs->bb, bs->buf, 0);
+    }
+    bs->bb.i_left = left;
 }
 
 int bs_init( BITSTREAM *bs, BD_FILE_H *fp )
@@ -184,6 +198,11 @@ uint32_t bb_read( BITBUFFER *bb, int i_count )
     int      i_shr;
     uint32_t i_result = 0;
 
+    if (i_count > 32) {
+        BD_ASSERT(i_count <= 32);
+        i_count = 32;
+    }
+
     while( i_count > 0 ) {
 
         if( bb->p >= bb->p_end ) {
@@ -214,16 +233,16 @@ uint32_t bb_read( BITBUFFER *bb, int i_count )
 
 uint32_t bs_read( BITSTREAM *bs, int i_count )
 {
-    int left;
-    int bytes = (i_count + 7) >> 3;
+    int bytes;
+
+    if (i_count > 32) {
+        BD_ASSERT(i_count <= 32);
+        i_count = 32;
+    }
+    bytes = (i_count + 7) >> 3;
 
     if (bs->bb.p + bytes >= bs->bb.p_end) {
-        bs->pos = bs->pos + (bs->bb.p - bs->bb.p_start);
-        left = bs->bb.i_left;
-        file_seek(bs->fp, bs->pos, SEEK_SET);
-        bs->size = file_read(bs->fp, bs->buf, BF_BUF_SIZE);
-        bb_init(&bs->bb, bs->buf, bs->size);
-        bs->bb.i_left = left;
+        _bs_refill(bs);
     }
     return bb_read(&bs->bb, i_count);
 }
@@ -241,16 +260,10 @@ void bb_skip( BITBUFFER *bb, size_t i_count )
 
 void bs_skip( BITSTREAM *bs, size_t i_count )
 {
-    int left;
     size_t bytes = (i_count + 7) >> 3;
 
     if (bs->bb.p + bytes >= bs->bb.p_end) {
-        bs->pos = bs->pos + (bs->bb.p - bs->bb.p_start);
-        left = bs->bb.i_left;
-        file_seek(bs->fp, bs->pos, SEEK_SET);
-        bs->size = file_read(bs->fp, bs->buf, BF_BUF_SIZE);
-        bb_init(&bs->bb, bs->buf, bs->size);
-        bs->bb.i_left = left;
+        _bs_refill(bs);
     }
     bb_skip(&bs->bb, i_count);
 }

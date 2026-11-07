@@ -338,6 +338,12 @@ _parse_ep_map_stream(BITSTREAM *bits, CLPI_EP_MAP_ENTRY *ee)
     }
     for (ii = 0; ii < ee->num_ep_coarse; ii++) {
         coarse[ii].ref_ep_fine_id = bs_read(bits, 18);
+        if (coarse[ii].ref_ep_fine_id >= ee->num_ep_fine) {
+            BD_DEBUG(DBG_HDMV | DBG_CRIT, "clpi_parse: invalid EP fine reference %u\n", coarse[ii].ref_ep_fine_id);
+            if (ee->num_ep_fine > 0) {
+                coarse[ii].ref_ep_fine_id = ee->num_ep_fine - 1;
+            }
+        }
         coarse[ii].pts_ep         = bs_read(bits, 14);
         coarse[ii].spn_ep         = bs_read(bits, 32);
     }
@@ -426,7 +432,8 @@ clpi_find_stc_spn(const CLPI_CL *cl, uint8_t stc_id)
 
     for (ii = 0; ii < cl->sequence.num_atc_seq; ii++) {
         atc = &cl->sequence.atc_seq[ii];
-        if (stc_id < atc->offset_stc_id + atc->num_stc_seq) {
+        if (stc_id >= atc->offset_stc_id &&
+            stc_id < atc->offset_stc_id + atc->num_stc_seq) {
             return atc->stc_seq[stc_id - atc->offset_stc_id].spn_stc_start;
         }
     }
@@ -456,6 +463,13 @@ clpi_lookup_spn(const CLPI_CL *cl, uint32_t timestamp, int before, uint8_t stc_i
 
     // Assumes that there is only one pid of interest
     entry = &cpi->entry[0];
+
+    if (entry->num_ep_fine < 1 || entry->num_ep_coarse < 1) {
+        if (before) {
+            return 0;
+        }
+        return cl->clip.num_source_packets;
+    }
 
     // Use sequence info to find spn_stc_start before doing
     // PTS search. The spn_stc_start defines the point in
@@ -535,6 +549,9 @@ done:
         }
         jj = entry->coarse[ii].ref_ep_fine_id;
     }
+    if (jj < 0) {
+        jj = 0;
+    }
     spn = (entry->coarse[ii].spn_ep & ~0x1FFFF) + entry->fine[jj].spn_ep;
     return spn;
 }
@@ -552,8 +569,18 @@ clpi_access_point(const CLPI_CL *cl, uint32_t pkt, int next, int angle_change, u
     int start, end;
     int ref;
 
+    if (cpi->num_stream_pid < 1 || !cpi->entry) {
+        *time = 0;
+        return 0;
+    }
+
     // Assumes that there is only one pid of interest
     entry = &cpi->entry[0];
+
+    if (entry->num_ep_fine < 1 || entry->num_ep_coarse < 1) {
+        *time = 0;
+        return 0;
+    }
 
     for (ii = 0; ii < entry->num_ep_coarse; ii++) {
         ref = entry->coarse[ii].ref_ep_fine_id;
@@ -587,7 +614,9 @@ clpi_access_point(const CLPI_CL *cl, uint32_t pkt, int next, int angle_change, u
         ii++;
         jj = 0;
     } else if (spn != pkt && !next) {
-        jj--;
+        if (jj > 0) {
+            jj--;
+        }
     }
     if (ii == entry->num_ep_coarse) {
         *time = 0;

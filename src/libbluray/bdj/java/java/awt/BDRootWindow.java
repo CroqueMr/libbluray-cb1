@@ -154,7 +154,8 @@ public class BDRootWindow extends Frame {
 
         public void run() {
             synchronized (window) {
-                if (this.changeCount == window.changeCount)
+                if (this.changeCount == window.changeCount ||
+                    System.nanoTime() - startTime >= 100000000L)
                     window.sync();
                 else
                     this.changeCount = window.changeCount;
@@ -163,6 +164,7 @@ public class BDRootWindow extends Frame {
 
         private BDRootWindow window;
         private int changeCount;
+        private final long startTime = System.nanoTime();
     }
 
     private void close() {

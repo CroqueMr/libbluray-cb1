@@ -1134,7 +1134,7 @@ static int _hdmv_step(HDMV_VM *p)
                 BD_DEBUG(DBG_HDMV|DBG_CRIT, "missing operand in BRANCH/JUMP opcode 0x%08x\n", *(uint32_t*)insn);
             }
             switch (insn->cmp_opt) {
-                case INSN_BC: p->pc += !!(dst & ~src); break;
+                case INSN_BC: p->pc += !!(src & ~dst); break;
                 case INSN_EQ: p->pc += !(dst == src); break;
                 case INSN_NE: p->pc += !(dst != src); break;
                 case INSN_GE: p->pc += !(dst >= src); break;
@@ -1169,10 +1169,10 @@ static int _hdmv_step(HDMV_VM *p)
                         case INSN_AND:    dst &= src;         break;
                         case INSN_OR:     dst |= src;         break;
                         case INSN_XOR:    dst ^= src;         break;
-                        case INSN_BITSET: dst |=  (1 << src); break;
-                        case INSN_BITCLR: dst &= ~(1 << src); break;
-                        case INSN_SHL:    dst <<= src;        break;
-                        case INSN_SHR:    dst >>= src;        break;
+                        case INSN_BITSET: if (src < 32) dst |=  (UINT32_C(1) << src); break;
+                        case INSN_BITCLR: if (src < 32) dst &= ~(UINT32_C(1) << src); break;
+                        case INSN_SHL:    if (src < 32) dst <<= src; else dst = 0; break;
+                        case INSN_SHR:    if (src < 32) dst >>= src; else dst = 0; break;
                         default:
                             BD_DEBUG(DBG_HDMV|DBG_CRIT, "unknown SET option %d in opcode 0x%08x\n",
                                      insn->set_opt, *(uint32_t*)insn);
