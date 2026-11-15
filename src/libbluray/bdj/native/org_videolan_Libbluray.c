@@ -335,7 +335,7 @@ JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_soundEffectN(JNIEnv * env,
 JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_tellTimeN(JNIEnv * env,
         jclass cls, jlong np) {
     BLURAY* bd = (BLURAY*)(intptr_t)np;
-    return bd_tell_time(bd);
+    return bdpriv_bdj_tell_time(bd);
 }
 
 JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectRateN(JNIEnv * env,

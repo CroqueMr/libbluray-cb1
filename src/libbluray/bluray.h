@@ -1127,6 +1127,42 @@ BD_PUBLIC int bd_get_sound_effect(BLURAY *bd, unsigned sound_id, struct bd_sound
  */
 BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
 
+/*
+ * BD-J presentation timing.
+ *
+ * The reader runs ahead of the picture by the player's buffer depth. When
+ * enabled, while a BD-J title plays, the notifications the reader produces for
+ * the BD-J application (play mark, playitem, chapter, end of playlist) and the
+ * PSR 8 presentation time are held and numbered instead of delivered, and the
+ * application's media clock reports the presented position. The player
+ * stamps bd_bdj_pending_seq() with the read position after each read and
+ * calls bd_bdj_release() when the picture reaches it. HDMV titles, user input,
+ * register writes by the application, seeks and title changes are unaffected;
+ * anything held is released before a seek, a playlist change or a title change.
+ */
+#define BD_BDJ_PRESENTATION_TIMING 1
+
+/**
+ *  Enable or disable BD-J presentation timing (default: disabled).
+ *  Disabling releases everything held.
+ */
+BD_PUBLIC void     bd_bdj_set_presentation_timing(BLURAY *bd, int enable);
+
+/**
+ *  Sequence number of the newest held item, or 0 when nothing is held.
+ */
+BD_PUBLIC uint32_t bd_bdj_pending_seq(BLURAY *bd);
+
+/**
+ *  Deliver every held item numbered up to and including seq.
+ */
+BD_PUBLIC void     bd_bdj_release(BLURAY *bd, uint32_t seq);
+
+/**
+ *  Deliver everything held (flush, seek, stop).
+ */
+BD_PUBLIC void     bd_bdj_release_all(BLURAY *bd);
+
 /**
  *
  *  Set current playback rate.
