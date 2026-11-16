@@ -57,6 +57,7 @@
 #include <stdio.h> // SEEK_
 #include <stdlib.h>
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <string.h>
 
 
@@ -152,19 +153,18 @@ struct bluray {
      * PSR 8 presentation time are held here, each with a sequence number, and
      * handed to BD-J only when the player reports that the picture reached
      * the point where they were read (bd_bdj_release()). */
-    uint8_t         bdj_pt_enabled;
+    atomic_uchar    bdj_pt_enabled;
     uint8_t         bdj_pt_releasing;
-    uint8_t         bdj_pt_presented_valid;
-    uint32_t        bdj_pt_seq;
-    uint64_t        bdj_pt_presented_time; /* title time, 1/90000 s */
+    uint32_t        bdj_pt_seq, bdj_pt_advertised_seq;
+    atomic_uint_least64_t bdj_pt_position; /* player's playlist time, 90 kHz */
+    atomic_uint_least64_t bdj_pt_last_psr_time;
     /* PSR 5 (chapter) and 7 (playitem) as presented. The registers themselves
      * are written at read time - the reader, the graphics controller and the
      * player's own BD_EVENT_PLAYITEM/CHAPTER depend on that - so while
      * notifications are held, the application reads these instead
      * (bdpriv_reg_read), keeping PSR 5/7 consistent with the held PSR 8 and
      * PLAYITEM/CHAPTER events rather than a whole playitem ahead of them. */
-    uint8_t         bdj_pt_playitem_valid, bdj_pt_chapter_valid;
-    uint32_t        bdj_pt_playitem, bdj_pt_chapter;
+    atomic_uint_least32_t bdj_pt_playitem, bdj_pt_chapter; /* UINT32_MAX: no shadow */
     uint32_t        bdj_pt_chapter_seed_seq; /* queue seq of the CHAPTER that seeded the shadow */
     unsigned        bdj_pt_head, bdj_pt_count;
     struct {
@@ -296,6 +296,14 @@ static int _queue_event(BLURAY *bd, uint32_t event, uint32_t param)
 static int  _bdj_pt_active(BLURAY *bd);
 static void _bdj_pt_push(BLURAY *bd, int is_time, uint32_t ev, uint32_t param, uint64_t title_time);
 static void _bdj_pt_release(BLURAY *bd, uint32_t upto, int all);
+
+static void _bdj_pt_reset(BLURAY *bd)
+{
+    bd->bdj_pt_position = UINT64_MAX;
+    bd->bdj_pt_last_psr_time = UINT64_MAX;
+    bd->bdj_pt_playitem = UINT32_MAX;
+    bd->bdj_pt_chapter = UINT32_MAX;
+}
 
 /* PSR 8 is the presentation time. Under BD-J presentation timing the
  * reader's value is held until the picture reaches it. */
@@ -1377,23 +1385,12 @@ BD_DISC *bdpriv_get_disc(BLURAY *bd)
 uint32_t bdpriv_reg_read(BLURAY *bd, int psr, int reg)
 {
     if (psr) {
-        /* the application's view of the playback position (see bdj_pt_playitem) */
-        if (reg == PSR_PLAYITEM || reg == PSR_CHAPTER) {
-            int held = 0;
-            uint32_t v = 0;
-            bd_mutex_lock(&bd->mutex);
-            if (bd->bdj_pt_count > 0 && bd->bdj_pt_enabled && bd->title_type == title_bdj) {
-                if (reg == PSR_PLAYITEM && bd->bdj_pt_playitem_valid) {
-                    v = bd->bdj_pt_playitem;
-                    held = 1;
-                } else if (reg == PSR_CHAPTER && bd->bdj_pt_chapter_valid) {
-                    v = bd->bdj_pt_chapter;
-                    held = 1;
-                }
-            }
-            bd_mutex_unlock(&bd->mutex);
-            if (held) {
-                return v;
+        /* BD-J callbacks may already run under the reader lock. Only read
+         * published scalar values here, without entering the reader. */
+        if (bd->bdj_pt_enabled && (reg == PSR_PLAYITEM || reg == PSR_CHAPTER)) {
+            uint32_t value = reg == PSR_PLAYITEM ? bd->bdj_pt_playitem : bd->bdj_pt_chapter;
+            if (value != UINT32_MAX) {
+                return value;
             }
         }
         return bd_psr_read(bd->regs, reg);
@@ -1520,9 +1517,7 @@ static int _start_bdj(BLURAY *bd, unsigned title)
     }
 
     _bdj_pt_release(bd, 0, 1);
-    bd->bdj_pt_presented_valid = 0;
-    bd->bdj_pt_playitem_valid = 0;
-    bd->bdj_pt_chapter_valid = 0;
+    _bdj_pt_reset(bd);
     return !bdj_process_event(bd->bdjava, BDJ_EVENT_START, title);
 }
 
@@ -1536,21 +1531,18 @@ static void _bdj_pt_deliver(BLURAY *bd, unsigned idx)
 {
     bd->bdj_pt_releasing = 1;
     if (bd->bdj_pt_queue[idx].is_time) {
-        bd->bdj_pt_presented_time  = bd->bdj_pt_queue[idx].title_time;
-        bd->bdj_pt_presented_valid = 1;
+        bd->bdj_pt_last_psr_time = bd->bdj_pt_queue[idx].title_time;
         /* the write callback delivers BDJ_EVENT_PTS */
         bd_psr_write(bd->regs, PSR_TIME, bd->bdj_pt_queue[idx].param);
     } else {
         if (bd->bdj_pt_queue[idx].ev == BDJ_EVENT_PLAYITEM) {
-            bd->bdj_pt_playitem       = bd->bdj_pt_queue[idx].param;
-            bd->bdj_pt_playitem_valid = 1;
+            bd->bdj_pt_playitem = bd->bdj_pt_queue[idx].param;
         } else if (bd->bdj_pt_queue[idx].ev == BDJ_EVENT_CHAPTER) {
             /* a CHAPTER held before the one that seeded the shadow (the
              * 0xffff reset marker) must not take it back */
-            if (!bd->bdj_pt_chapter_valid ||
+            if (bd->bdj_pt_chapter == UINT32_MAX ||
                 (int32_t)(bd->bdj_pt_queue[idx].seq - bd->bdj_pt_chapter_seed_seq) >= 0) {
-                bd->bdj_pt_chapter       = bd->bdj_pt_queue[idx].param;
-                bd->bdj_pt_chapter_valid = 1;
+                bd->bdj_pt_chapter = bd->bdj_pt_queue[idx].param;
             }
         }
         if (bd->bdjava != NULL) {
@@ -1579,11 +1571,15 @@ static void _bdj_pt_push(BLURAY *bd, int is_time, uint32_t ev, uint32_t param, u
     const unsigned size = sizeof(bd->bdj_pt_queue) / sizeof(bd->bdj_pt_queue[0]);
     unsigned idx;
 
-    /* consecutive time updates collapse into the newest one */
+    /* Once the player observes a sequence, it must be releasable at its stamp. */
+    if (++bd->bdj_pt_seq == 0) {
+        ++bd->bdj_pt_seq;
+    }
     if (is_time && bd->bdj_pt_count > 0) {
         idx = (bd->bdj_pt_head + bd->bdj_pt_count - 1) % size;
-        if (bd->bdj_pt_queue[idx].is_time) {
-            bd->bdj_pt_queue[idx].seq        = ++bd->bdj_pt_seq;
+        if (bd->bdj_pt_queue[idx].is_time &&
+            bd->bdj_pt_queue[idx].seq != bd->bdj_pt_advertised_seq) {
+            bd->bdj_pt_queue[idx].seq        = bd->bdj_pt_seq;
             bd->bdj_pt_queue[idx].param      = param;
             bd->bdj_pt_queue[idx].title_time = title_time;
             return;
@@ -1606,17 +1602,16 @@ static void _bdj_pt_push(BLURAY *bd, int is_time, uint32_t ev, uint32_t param, u
      * exists to hide. Not the CHAPTER reset marker (0xffff, written when a
      * playlist opens after one that had chapters): the chapter the picture
      * starts on is the next CHAPTER event. */
-    if (!is_time && ev == BDJ_EVENT_PLAYITEM && !bd->bdj_pt_playitem_valid) {
-        bd->bdj_pt_playitem       = param;
-        bd->bdj_pt_playitem_valid = 1;
-    } else if (!is_time && ev == BDJ_EVENT_CHAPTER && !bd->bdj_pt_chapter_valid && param != 0xffff) {
-        bd->bdj_pt_chapter          = param;
-        bd->bdj_pt_chapter_valid    = 1;
-        bd->bdj_pt_chapter_seed_seq = bd->bdj_pt_seq + 1; /* this entry's seq, assigned below */
+    if (!is_time && ev == BDJ_EVENT_PLAYITEM && bd->bdj_pt_playitem == UINT32_MAX) {
+        bd->bdj_pt_playitem = param;
+    } else if (!is_time && ev == BDJ_EVENT_CHAPTER &&
+               bd->bdj_pt_chapter == UINT32_MAX && param != 0xffff) {
+        bd->bdj_pt_chapter = param;
+        bd->bdj_pt_chapter_seed_seq = bd->bdj_pt_seq;
     }
 
     idx = (bd->bdj_pt_head + bd->bdj_pt_count) % size;
-    bd->bdj_pt_queue[idx].seq        = ++bd->bdj_pt_seq;
+    bd->bdj_pt_queue[idx].seq        = bd->bdj_pt_seq;
     bd->bdj_pt_queue[idx].is_time    = (uint8_t)is_time;
     bd->bdj_pt_queue[idx].ev         = ev;
     bd->bdj_pt_queue[idx].param      = param;
@@ -1652,9 +1647,7 @@ static int _bdj_event(BLURAY *bd, unsigned ev, unsigned param)
 static void _stop_bdj(BLURAY *bd)
 {
     _bdj_pt_release(bd, 0, 1);
-    bd->bdj_pt_presented_valid = 0;
-    bd->bdj_pt_playitem_valid = 0;
-    bd->bdj_pt_chapter_valid = 0;
+    _bdj_pt_reset(bd);
     if (bd->bdjava != NULL) {
         bdj_process_event(bd->bdjava, BDJ_EVENT_STOP, 0);
         _queue_event(bd, BD_EVENT_STILL, 0);
@@ -1688,6 +1681,11 @@ BLURAY *bd_init(void)
         return NULL;
     }
 
+    atomic_init(&bd->bdj_pt_enabled, 0);
+    atomic_init(&bd->bdj_pt_position, UINT64_MAX);
+    atomic_init(&bd->bdj_pt_last_psr_time, UINT64_MAX);
+    atomic_init(&bd->bdj_pt_playitem, UINT32_MAX);
+    atomic_init(&bd->bdj_pt_chapter, UINT32_MAX);
     bd->regs = bd_registers_init();
     if (!bd->regs) {
         BD_DEBUG(DBG_BLURAY, "bd_registers_init() failed\n");
@@ -2644,9 +2642,7 @@ static void _close_playlist(BLURAY *bd)
      * will not be shown, so hand it over now (the behaviour without
      * presentation timing) and forget the presented position */
     _bdj_pt_release(bd, 0, 1);
-    bd->bdj_pt_presented_valid = 0;
-    bd->bdj_pt_playitem_valid = 0;
-    bd->bdj_pt_chapter_valid = 0;
+    _bdj_pt_reset(bd);
 
     if (bd->graphics_controller) {
         gc_run(bd->graphics_controller, GC_CTRL_RESET, 0, NULL);
@@ -4201,9 +4197,7 @@ void bd_bdj_set_presentation_timing(BLURAY *bd, int enable)
     bd_mutex_lock(&bd->mutex);
     if (!enable) {
         _bdj_pt_release(bd, 0, 1);
-        bd->bdj_pt_presented_valid = 0;
-    bd->bdj_pt_playitem_valid = 0;
-    bd->bdj_pt_chapter_valid = 0;
+        _bdj_pt_reset(bd);
     }
     bd->bdj_pt_enabled = !!enable;
     bd_mutex_unlock(&bd->mutex);
@@ -4214,6 +4208,8 @@ uint32_t bd_bdj_pending_seq(BLURAY *bd)
     uint32_t seq;
     bd_mutex_lock(&bd->mutex);
     seq = bd->bdj_pt_count ? bd->bdj_pt_seq : 0;
+    if (seq)
+        bd->bdj_pt_advertised_seq = seq;
     bd_mutex_unlock(&bd->mutex);
     return seq;
 }
@@ -4229,21 +4225,25 @@ void bd_bdj_release_all(BLURAY *bd)
 {
     bd_mutex_lock(&bd->mutex);
     _bdj_pt_release(bd, 0, 1);
+    _bdj_pt_reset(bd);
     bd_mutex_unlock(&bd->mutex);
+}
+
+void bd_bdj_set_playback_time(BLURAY *bd, uint64_t time)
+{
+    bd->bdj_pt_position = time;
 }
 
 uint64_t bdpriv_bdj_tell_time(BLURAY *bd)
 {
-    uint64_t t = 0;
-    int valid;
-    bd_mutex_lock(&bd->mutex);
-    valid = bd->bdj_pt_enabled && bd->title_type == title_bdj && bd->bdj_pt_presented_valid;
-    if (valid) {
-        t = bd->bdj_pt_presented_time;
-    }
-    bd_mutex_unlock(&bd->mutex);
-    /* nothing presented yet in this playlist: the read position is exact */
-    return valid ? t : bd_tell_time(bd);
+    if (!bd->bdj_pt_enabled)
+        return bd_tell_time(bd);
+
+    uint64_t time = bd->bdj_pt_position;
+    if (time != UINT64_MAX)
+        return time;
+    time = bd->bdj_pt_last_psr_time;
+    return time == UINT64_MAX ? 0 : time;
 }
 
 static int _get_rate_uo_index(BLURAY *bd, uint32_t rate, bd_uo_mask_index_e *uo_index)
