@@ -67,11 +67,11 @@ public class PlayItemImpl implements PlayItem {
 
     public ServiceComponent[] getComponents() {
         StreamInfo[] video = clip.getVideoStreams();
-        StreamInfo[] audio = clip.getVideoStreams();
-        StreamInfo[] pg = clip.getVideoStreams();
-        StreamInfo[] ig = clip.getVideoStreams();
-        StreamInfo[] secVideo = clip.getVideoStreams();
-        StreamInfo[] secAudio = clip.getVideoStreams();
+        StreamInfo[] audio = clip.getAudioStreams();
+        StreamInfo[] pg = clip.getPgStreams();
+        StreamInfo[] ig = clip.getIgStreams();
+        StreamInfo[] secVideo = clip.getSecVideoStreams();
+        StreamInfo[] secAudio = clip.getSecAudioStreams();
 
         int count = video.length + audio.length + pg.length + ig.length + secVideo.length + secAudio.length;
 
