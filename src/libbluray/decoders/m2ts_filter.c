@@ -52,11 +52,15 @@ struct m2ts_filter_s
     int64_t  out_pts;
     uint32_t pat_packets; /* how many packets to search for PAT (seeked pat_packets packets before the actual seek point) */
     uint8_t  pat_seen;
+    unsigned video_preroll; /* number of video PIDs whose decode references are retained */
 };
+
+static void _remove_pid(uint16_t *list, uint16_t pid);
+static void _add_pid(uint16_t *list, uint16_t pid);
 
 M2TS_FILTER *m2ts_filter_init(int64_t in_pts, int64_t out_pts,
                               unsigned num_video, unsigned num_audio,
-                              unsigned num_ig, unsigned num_pg)
+                              unsigned num_ig, unsigned num_pg, int video_preroll)
 {
     M2TS_FILTER *p = calloc(1, sizeof(*p));
 
@@ -64,6 +68,7 @@ M2TS_FILTER *m2ts_filter_init(int64_t in_pts, int64_t out_pts,
         unsigned ii, npid;
         uint16_t *pid;
 
+        p->video_preroll = video_preroll ? num_video : 0;
         p->in_pts   = in_pts;
         p->out_pts  = out_pts;
         p->wipe_pid = calloc(num_audio + num_video + num_ig + num_pg + 1, sizeof(uint16_t));
@@ -81,11 +86,20 @@ M2TS_FILTER *m2ts_filter_init(int64_t in_pts, int64_t out_pts,
         for (ii = 0; ii < num_audio; ii++) {
             pid[npid++] = HDMV_PID_AUDIO_FIRST + ii;
         }
+        for (ii = 0; ii < num_pg; ii++) {
+            pid[npid++] = HDMV_PID_PG_FIRST + ii;
+        }
         for (ii = 0; ii < num_ig; ii++) {
             pid[npid++] = HDMV_PID_IG_FIRST + ii;
         }
-        for (ii = 0; ii < num_pg; ii++) {
-            pid[npid++] = HDMV_PID_PG_FIRST + ii;
+
+        /* The lists are sorted for _pid_in_list. Video references are decoded
+         * before IN only when the application negotiated presentation gating. */
+        if (in_pts >= 0) {
+            for (ii = 0; ii < p->video_preroll; ii++) {
+                _remove_pid(p->wipe_pid, HDMV_PID_VIDEO + ii);
+                _add_pid(p->pass_pid, HDMV_PID_VIDEO + ii);
+            }
         }
     }
 
@@ -194,6 +208,11 @@ void m2ts_filter_seek(M2TS_FILTER *p, uint32_t pat_packets, int64_t in_pts)
         _add_pid(p->wipe_pid, *pid);
         *pid = 0;
         pid++;
+    }
+
+    for (unsigned ii = 0; ii < p->video_preroll; ii++) {
+        _remove_pid(p->wipe_pid, HDMV_PID_VIDEO + ii);
+        _add_pid(p->pass_pid, HDMV_PID_VIDEO + ii);
     }
 
     p->in_pts   = in_pts;

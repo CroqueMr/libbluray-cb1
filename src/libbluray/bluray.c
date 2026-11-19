@@ -162,6 +162,7 @@ struct bluray {
     BD_UO_MASK           gc_uo_mask;      /* UO mask from current menu page */
     uint32_t             gc_status;
     uint8_t              decode_pg;
+    uint8_t              dv_video_preroll;
 
     /* TextST */
     uint32_t gc_wakeup_time;  /* stream timestamp of next subtitle */
@@ -687,7 +688,12 @@ static int _open_m2ts(BLURAY *bd, BD_STREAM *st)
                 st->m2ts_filter = m2ts_filter_init((int64_t)st->clip->in_time << 1,
                                                    (int64_t)st->clip->out_time << 1,
                                                    stn->num_video, stn->num_audio,
-                                                   stn->num_ig, stn->num_pg);
+                                                   stn->num_ig, stn->num_pg,
+                                                   bd->dv_video_preroll &&
+                                                   stn->num_video == 1 && stn->video &&
+                                                   stn->video[0].coding_type == 0x24 &&
+                                                   stn->num_dv == 1 && stn->dv &&
+                                                   stn->dv[0].coding_type == 0x24);
 
                 _update_clip_psrs(bd, st->clip);
 
@@ -1930,7 +1936,14 @@ int64_t bd_seek_mark(BLURAY *bd, unsigned mark)
         // Find the closest access unit to the requested position
         clip = nav_mark_search(bd->title, mark, &clip_pkt, &out_pkt);
 
-        _seek_internal(bd, clip, out_pkt, clip_pkt);
+        /* Distinct mark times can share one access packet. A mark seek
+         * consumes its target, not the later marks in that same packet. */
+        if (_seek_internal(bd, clip, out_pkt, clip_pkt) >= 0 &&
+            mark + 1 < bd->title->mark_list.count &&
+            (uint64_t)bd->title->mark_list.mark[mark + 1].title_pkt * 192L == bd->s_pos) {
+            bd->next_mark = mark + 1;
+            bd->next_mark_pos = bd->s_pos;
+        }
 
     } else {
         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_seek_mark(%u) failed\n", mark);
@@ -2029,7 +2042,7 @@ static int64_t _clip_seek_time(BLURAY *bd, uint32_t tick)
     return bd->s_pos;
 }
 
-static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
+static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
 {
     BD_STREAM *st = &bd->st0;
     int out_len = 0;
@@ -2042,6 +2055,9 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
             clip_pkt = SPN(st->clip_pos);
             if (bd->seamless_angle_change) {
                 if (clip_pkt >= bd->angle_change_pkt) {
+                    if (nav_boundary && out_len) {
+                        return out_len;
+                    }
                     if (clip_pkt >= st->clip->end_pkt) {
                         st->clip = nav_next_clip(bd->title, st->clip);
                         if (!_open_m2ts(bd, st)) {
@@ -2053,6 +2069,9 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
                         _clip_seek_time(bd, bd->angle_change_time);
                     }
                     bd->seamless_angle_change = 0;
+                    if (nav_boundary) {
+                        return 0;
+                    }
                 } else {
                     uint64_t angle_pos;
 
@@ -2099,6 +2118,11 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
                     if (st->clip->connection == CONNECT_NON_SEAMLESS) {
                         /* application layer demuxer buffers must be reset here */
                         _queue_event(bd, BD_EVENT_DISCONTINUITY, st->clip->in_time);
+                    }
+                    /* Announce the new play item before its first transport bytes.
+                     * The application may recreate its demuxer for this event. */
+                    if (nav_boundary) {
+                        return 0;
                     }
 
                 }
@@ -2170,7 +2194,7 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len)
         return out_len;
 }
 
-static int _bd_read_locked(BLURAY *bd, unsigned char *buf, int len)
+static int _bd_read_locked(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
 {
     BD_STREAM *st = &bd->st0;
     int r;
@@ -2190,7 +2214,7 @@ static int _bd_read_locked(BLURAY *bd, unsigned char *buf, int len)
 
     BD_DEBUG(DBG_STREAM, "Reading [%d bytes] at %" PRIu64 "...\n", len, bd->s_pos);
 
-    r = _bd_read(bd, buf, len);
+    r = _bd_read(bd, buf, len, nav_boundary);
 
     /* mark tracking */
     if (bd->next_mark >= 0 && bd->s_pos > bd->next_mark_pos) {
@@ -2205,7 +2229,7 @@ int bd_read(BLURAY *bd, unsigned char *buf, int len)
     int result;
 
     bd_mutex_lock(&bd->mutex);
-    result = _bd_read_locked(bd, buf, len);
+    result = _bd_read_locked(bd, buf, len, 0);
     bd_mutex_unlock(&bd->mutex);
 
     return result;
@@ -3062,6 +3086,16 @@ int bd_set_player_setting(BLURAY *bd, uint32_t idx, uint32_t value)
     unsigned i;
     int result;
 
+    if (idx == BLURAY_PLAYER_SETTING_DV_VIDEO_PREROLL) {
+        bd_mutex_lock(&bd->mutex);
+        result = value <= 1 && bd->title_type == title_undef && !bd->title;
+        if (result) {
+            bd->dv_video_preroll = (uint8_t)value;
+        }
+        bd_mutex_unlock(&bd->mutex);
+        return result;
+    }
+
     if (idx == BLURAY_PLAYER_SETTING_DECODE_PG) {
         bd_mutex_lock(&bd->mutex);
 
@@ -3902,7 +3936,7 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
         }
     }
 
-    int bytes = _bd_read_locked(bd, buf, len);
+    int bytes = _bd_read_locked(bd, buf, len, bd->event_queue != NULL);
 
     if (bytes == 0) {
 
