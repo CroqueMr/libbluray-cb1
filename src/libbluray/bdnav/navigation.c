@@ -546,14 +546,21 @@ _fill_mark(const NAV_TITLE *title, NAV_MARK *mark, int entry)
 
     mark->mark_type = plm->mark_type;
     mark->clip_ref = plm->play_item_ref;
-    clip = &title->clip_list.clip[mark->clip_ref];
-    if (clip->cl != NULL && mark->clip_ref < title->pl->list_count) {
-        mark->clip_pkt = clpi_lookup_spn(clip->cl, plm->time, 1,
-            title->pl->play_item[mark->clip_ref].clip[title->angle].stc_id);
-    } else {
-        mark->clip_pkt = clip->start_pkt;
+    if (mark->clip_ref >= title->clip_list.count) {
+        BD_DEBUG(DBG_NAV | DBG_CRIT, "_fill_mark(): invalid play_item_ref %d\n", plm->play_item_ref);
+        mark->clip_ref = 0;
     }
-    mark->title_pkt = clip->title_pkt + mark->clip_pkt - clip->start_pkt;
+
+    if (title->clip_list.count) {
+        clip = &title->clip_list.clip[mark->clip_ref];
+        if (clip->cl != NULL && mark->clip_ref < title->pl->list_count) {
+            mark->clip_pkt = clpi_lookup_spn(clip->cl, plm->time, 1,
+                    title->pl->play_item[mark->clip_ref].clip[clip->angle].stc_id);
+        } else {
+            mark->clip_pkt = clip->start_pkt;
+        }
+        mark->title_pkt = clip->title_pkt + mark->clip_pkt - clip->start_pkt;
+    }
     mark->clip_time = plm->time;
 
     // Calculate start of mark relative to beginning of playlist
@@ -743,6 +750,10 @@ NAV_TITLE* nav_title_open(BD_DISC *disc, const char *playlist, unsigned angle)
     strncpy(title->name, playlist, 11);
     title->name[10] = '\0';
     title->angle_count = 0;
+    if (angle > 8) {
+        // invalid angle
+        angle = 0;
+    }
     title->angle = angle;
     title->pl = mpls_get(disc, playlist);
     if (title->pl == NULL) {
@@ -838,7 +849,7 @@ const NAV_CLIP* nav_chapter_search(const NAV_TITLE *title, unsigned chapter,
         return NULL;
     }
 
-    if (chapter > title->chap_list.count) {
+    if (chapter >= title->chap_list.count) {
         clip = &title->clip_list.clip[0];
         *clip_pkt = clip->start_pkt;
         *out_pkt = clip->title_pkt;
@@ -885,7 +896,7 @@ const NAV_CLIP* nav_mark_search(const NAV_TITLE *title, unsigned mark,
         return NULL;
     }
 
-    if (mark > title->mark_list.count) {
+    if (mark >= title->mark_list.count) {
         clip = &title->clip_list.clip[0];
         *clip_pkt = clip->start_pkt;
         *out_pkt = clip->title_pkt;
