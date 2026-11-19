@@ -82,7 +82,8 @@ public abstract class VideoControl extends StreamControl implements VideoPresent
         StreamInfo stream = getCurrentStream();
         if (stream == null)
             return new Dimension(0, 0);
-        return stream.getVideoSize();
+        Dimension size = stream.getVideoSize();
+        return size == null ? new Dimension(0, 0) : size;
     }
 
     public Dimension getVideoSize() {
