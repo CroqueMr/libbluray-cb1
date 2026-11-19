@@ -920,6 +920,10 @@ static int _create_jvm(void *jvm_lib, const char *java_home, BDJ_CONFIG *cfg,
     option[n++].optionString = str_dup   ("-Xms256M");
     option[n++].optionString = str_dup   ("-Xmx256M");
     option[n++].optionString = str_dup   ("-Xss2048k");
+#if !defined(_WIN32) && !defined(HAVE_BDJ_J2ME)
+    /* The embedding player owns process shutdown on POSIX. */
+    option[n++].optionString = str_dup   ("-Xrs");
+#endif
     option[n++].optionString = str_dup   ("-Djava.awt.headless=false");
     BD_DEBUG(DBG_CRIT | DBG_BDJ, "Disable X11 check\n");
 #ifdef HAVE_BDJ_J2ME
