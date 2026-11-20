@@ -1143,6 +1143,11 @@ BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
  * register writes by the application, seeks and title changes are unaffected;
  * anything held is released before a seek, a playlist change or a title change.
  */
+#define BD_BDJ_WAITING_FOR_PLAYLIST 1
+
+/** Whether the current BD-J title has no readable playlist yet. */
+BD_PUBLIC int bd_bdj_waiting_for_playlist(BLURAY *bd);
+
 #define BD_HDMV_END_HOLD 1
 
 /**
