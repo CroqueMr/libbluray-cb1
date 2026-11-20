@@ -4313,6 +4313,15 @@ void bd_set_scr(BLURAY *bd, int64_t pts)
     bd_mutex_unlock(&bd->mutex);
 }
 
+int bd_bdj_waiting_for_playlist(BLURAY *bd)
+{
+    int waiting;
+    bd_mutex_lock(&bd->mutex);
+    waiting = bd->title_type == title_bdj && (!bd->title || bd->bdj_wait_start);
+    bd_mutex_unlock(&bd->mutex);
+    return waiting;
+}
+
 static void _resume_hdmv_end(BLURAY *bd)
 {
     if (bd->hdmv_end_pending && bd->title_type == title_hdmv) {
