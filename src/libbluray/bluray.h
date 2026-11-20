@@ -1143,6 +1143,16 @@ BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
  * register writes by the application, seeks and title changes are unaffected;
  * anything held is released before a seek, a playlist change or a title change.
  */
+#define BD_HDMV_END_HOLD 1
+
+/**
+ * With the hold enabled, BD_EVENT_END_OF_TITLE carries 1 for an HDMV title.
+ * Release it after presenting the last pictures. The next bd_read_ext()
+ * can then run the resumed HDMV program.
+ */
+BD_PUBLIC void bd_hdmv_set_end_hold(BLURAY *bd, int enable);
+BD_PUBLIC void bd_hdmv_release_end(BLURAY *bd);
+
 #define BD_BDJ_PRESENTATION_TIMING 1
 
 /**
