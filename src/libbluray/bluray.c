@@ -1448,7 +1448,7 @@ static int _argb_visible(const unsigned *img, int stride, int x0, int y0, int x1
     int x, y;
 
     for (y = y0; y <= y1; y++) {
-        const unsigned *line = img + y * stride;
+        const unsigned *line = img + (size_t)y * stride;
         for (x = x0; x <= x1; x++) {
             if (line[x] & 0xff000000) {
                 return 1;
@@ -1458,14 +1458,14 @@ static int _argb_visible(const unsigned *img, int stride, int x0, int y0, int x1
     return 0;
 }
 
-static void _check_bdj_graphics(BLURAY *bd, const unsigned *img, int w, int h,
+void bdpriv_bdj_report_graphics(BLURAY *bd, const unsigned *img, int w, int h,
                                 int x0, int y0, int x1, int y1)
 {
     bd_mutex_lock(&bd->gfx_mutex);
 
-    if (bd->gfx_pending) {
+    if (bd->gfx_pending && bd->argb_overlay_proc) {
         int stride = w;
-        int scan_all = bd->gfx_scan_all;
+        int scan_all = bd->gfx_scan_all && !bd->argb_buffer;
 
         if (bd->argb_buffer && (bd->argb_buffer->width < w || bd->argb_buffer->height < h)) {
             /* the app buffer holds only the dirty area, at its origin */
@@ -1555,8 +1555,6 @@ void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
         bd->argb_buffer->dirty[BD_OVERLAY_IG].y0 = y0;
         bd->argb_buffer->dirty[BD_OVERLAY_IG].y1 = y1;
     }
-
-    _check_bdj_graphics(bd, img, w, h, x0, y0, x1, y1);
 
     /* draw */
     aov.cmd = BD_ARGB_OVERLAY_DRAW;
