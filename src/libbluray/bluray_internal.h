@@ -74,6 +74,7 @@ BD_PRIVATE void     bdpriv_select_rate(struct bluray *bd, float rate, int reason
 
 /* media time for BD-J: the presented position under presentation timing */
 BD_PRIVATE uint64_t bdpriv_bdj_tell_time(struct bluray *bd);
+BD_PRIVATE int64_t bdpriv_bdj_presented_time(struct bluray *bd, uint32_t playlist);
 BD_PRIVATE int      bdpriv_seek(struct bluray *bd, int playitem, int playmark, int64_t time);
 BD_PRIVATE int      bdpriv_sound_effect(struct bluray *bd, int id);
 
