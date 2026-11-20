@@ -1448,7 +1448,7 @@ static int _argb_visible(const unsigned *img, int stride, int x0, int y0, int x1
     int x, y;
 
     for (y = y0; y <= y1; y++) {
-        const unsigned *line = img + y * stride;
+        const unsigned *line = img + (size_t)y * stride;
         for (x = x0; x <= x1; x++) {
             if (line[x] & 0xff000000) {
                 return 1;
@@ -1458,14 +1458,14 @@ static int _argb_visible(const unsigned *img, int stride, int x0, int y0, int x1
     return 0;
 }
 
-static void _check_bdj_graphics(BLURAY *bd, const unsigned *img, int w, int h,
+void bdpriv_bdj_report_graphics(BLURAY *bd, const unsigned *img, int w, int h,
                                 int x0, int y0, int x1, int y1)
 {
     bd_mutex_lock(&bd->gfx_mutex);
 
-    if (bd->gfx_pending) {
+    if (bd->gfx_pending && bd->argb_overlay_proc) {
         int stride = w;
-        int scan_all = bd->gfx_scan_all;
+        int scan_all = bd->gfx_scan_all && !bd->argb_buffer;
 
         if (bd->argb_buffer && (bd->argb_buffer->width < w || bd->argb_buffer->height < h)) {
             /* the app buffer holds only the dirty area, at its origin */
@@ -1555,8 +1555,6 @@ void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
         bd->argb_buffer->dirty[BD_OVERLAY_IG].y0 = y0;
         bd->argb_buffer->dirty[BD_OVERLAY_IG].y1 = y1;
     }
-
-    _check_bdj_graphics(bd, img, w, h, x0, y0, x1, y1);
 
     /* draw */
     aov.cmd = BD_ARGB_OVERLAY_DRAW;
@@ -2476,11 +2474,11 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
                 size = 6144 - st->int_buf_off;
             }
 
-            /* cut read at clip end packet */
-            uint32_t new_clip_pkt = SPN(st->clip_pos + size);
-            if (new_clip_pkt > st->clip->end_pkt) {
-                BD_DEBUG(DBG_STREAM, "cut %d bytes at end of block\n", (new_clip_pkt - st->clip->end_pkt) * 192);
-                size -= (new_clip_pkt - st->clip->end_pkt) * 192;
+            /* A caller can request a partial source packet. Keep the next
+             * PLAYITEM at the exact byte boundary even for unaligned reads. */
+            uint64_t clip_remaining = (uint64_t)st->clip->end_pkt * 192 - st->clip_pos;
+            if (size > clip_remaining) {
+                size = (unsigned int)clip_remaining;
             }
 
             /* copy chunk */
