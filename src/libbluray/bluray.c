@@ -158,6 +158,8 @@ struct bluray {
     uint8_t         bdj_pt_releasing;
     uint32_t        bdj_pt_seq, bdj_pt_advertised_seq;
     atomic_uint_least64_t bdj_pt_position; /* player's playlist time, 90 kHz */
+    atomic_uint_least32_t bdj_pt_clock_epoch;
+    atomic_uchar bdj_pt_has_video;
     atomic_uint_least64_t bdj_pt_last_psr_time;
     /* PSR 5 (chapter) and 7 (playitem) as presented. The registers themselves
      * are written at read time - the reader, the graphics controller and the
@@ -311,6 +313,7 @@ static void _bdj_pt_release(BLURAY *bd, uint32_t upto, int all);
 static void _bdj_pt_reset(BLURAY *bd)
 {
     bd->bdj_pt_position = UINT64_MAX;
+    bd->bdj_pt_clock_epoch++;
     bd->bdj_pt_last_psr_time = UINT64_MAX;
     bd->bdj_pt_playitem = UINT32_MAX;
     bd->bdj_pt_chapter = UINT32_MAX;
@@ -749,6 +752,7 @@ static int _open_m2ts(BLURAY *bd, BD_STREAM *st)
                 const MPLS_PL *pl = st->clip->title->pl;
                 const MPLS_STN *stn = &pl->play_item[st->clip->ref].stn;
 
+                bd->bdj_pt_has_video = stn->num_video != 0;
                 st->uo_mask = uo_mask_combine(pl->app_info.uo_mask,
                                               pl->play_item[st->clip->ref].uo_mask);
                 _update_uo_mask(bd);
@@ -1707,6 +1711,7 @@ static int _bdj_event(BLURAY *bd, unsigned ev, unsigned param)
                 case BDJ_EVENT_SEEK:
                     _bdj_pt_release(bd, 0, 1);
                     bd->bdj_pt_position = UINT64_MAX;
+                    bd->bdj_pt_clock_epoch++;
                     bd->bdj_pt_last_psr_time = (uint64_t)param * 2;
                     break;
                 default:
@@ -1757,6 +1762,8 @@ BLURAY *bd_init(void)
 
     atomic_init(&bd->bdj_pt_enabled, 0);
     atomic_init(&bd->bdj_pt_position, UINT64_MAX);
+    atomic_init(&bd->bdj_pt_clock_epoch, 1);
+    atomic_init(&bd->bdj_pt_has_video, 0);
     atomic_init(&bd->bdj_pt_last_psr_time, UINT64_MAX);
     atomic_init(&bd->bdj_pt_playitem, UINT32_MAX);
     atomic_init(&bd->bdj_pt_chapter, UINT32_MAX);
@@ -2749,6 +2756,7 @@ static int _init_ig_stream(BLURAY *bd)
 
 static void _close_playlist(BLURAY *bd)
 {
+    bd->bdj_pt_has_video = 0;
     bd->hdmv_end_pending = 0;
     /* the program left this playlist: whatever it has not been shown yet it
      * will not be shown, so hand it over now (the behaviour without
@@ -4393,9 +4401,23 @@ void bd_bdj_set_playback_time(BLURAY *bd, uint64_t time)
     bd->bdj_pt_position = time;
 }
 
+uint32_t bd_bdj_get_clock_epoch(BLURAY *bd)
+{
+    return bd->bdj_pt_clock_epoch;
+}
+
+void bd_bdj_set_playback_time_at_epoch(BLURAY *bd, uint32_t epoch, uint64_t time)
+{
+    bd_mutex_lock(&bd->mutex);
+    if (epoch == bd->bdj_pt_clock_epoch)
+        bd->bdj_pt_position = time;
+    bd_mutex_unlock(&bd->mutex);
+}
+
 int64_t bdpriv_bdj_presented_time(BLURAY *bd, uint32_t playlist)
 {
-    if (!bd || !bd->bdj_pt_enabled || bd_psr_read(bd->regs, PSR_PLAYLIST) != playlist)
+    if (!bd || !bd->bdj_pt_enabled || !bd->bdj_pt_has_video ||
+        bd_psr_read(bd->regs, PSR_PLAYLIST) != playlist)
         return -1;
 
     uint64_t time = bd->bdj_pt_position;

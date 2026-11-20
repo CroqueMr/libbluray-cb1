@@ -1188,6 +1188,11 @@ BD_PUBLIC void     bd_bdj_release_all(BLURAY *bd);
 /* Publish the player's presented position on the current playlist (90 kHz). */
 BD_PUBLIC void     bd_bdj_set_playback_time(BLURAY *bd, uint64_t time);
 
+#define BD_BDJ_PLAYBACK_CLOCK_EPOCH 1
+/* A playlist replacement or seek invalidates the caller's old presentation samples. */
+BD_PUBLIC uint32_t bd_bdj_get_clock_epoch(BLURAY *bd);
+BD_PUBLIC void bd_bdj_set_playback_time_at_epoch(BLURAY *bd, uint32_t epoch, uint64_t time);
+
 /**
  *
  *  Set current playback rate.
