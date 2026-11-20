@@ -2474,11 +2474,11 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
                 size = 6144 - st->int_buf_off;
             }
 
-            /* cut read at clip end packet */
-            uint32_t new_clip_pkt = SPN(st->clip_pos + size);
-            if (new_clip_pkt > st->clip->end_pkt) {
-                BD_DEBUG(DBG_STREAM, "cut %d bytes at end of block\n", (new_clip_pkt - st->clip->end_pkt) * 192);
-                size -= (new_clip_pkt - st->clip->end_pkt) * 192;
+            /* A caller can request a partial source packet. Keep the next
+             * PLAYITEM at the exact byte boundary even for unaligned reads. */
+            uint64_t clip_remaining = (uint64_t)st->clip->end_pkt * 192 - st->clip_pos;
+            if (size > clip_remaining) {
+                size = (unsigned int)clip_remaining;
             }
 
             /* copy chunk */
