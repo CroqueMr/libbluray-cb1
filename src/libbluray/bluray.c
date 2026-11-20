@@ -188,6 +188,8 @@ struct bluray {
     uint8_t         bdj_psr_write;
 
     /* First visible BD-J graphics of the title started by the loader. */
+    uint8_t         hdmv_hold_end;
+    uint8_t         hdmv_end_pending;
     BD_MUTEX        gfx_mutex;
     uint8_t         gfx_pending;
     uint8_t         gfx_scan_all;
@@ -1990,6 +1992,10 @@ static int64_t _seek_internal(BLURAY *bd,
 
         /* update title position */
         bd->s_pos = (uint64_t)title_pkt * 192;
+        if (bd->title_type == title_hdmv && bd->hdmv_hold_end) {
+            bd->hdmv_end_pending = 0;
+            bd->end_of_playlist = 0;
+        }
 
         /* Update PSR_TIME */
         media_time = _update_time_psr_from_stream(bd);
@@ -2325,6 +2331,21 @@ static int64_t _clip_seek_time(BLURAY *bd, uint32_t tick)
     return bd->s_pos;
 }
 
+static void _end_of_title(BLURAY *bd)
+{
+    if (bd->title_type == title_hdmv && bd->hdmv_hold_end) {
+        if (!(bd->end_of_playlist & 1)) {
+            if (!_queue_event(bd, BD_EVENT_END_OF_TITLE, 1)) {
+                return;
+            }
+            bd->hdmv_end_pending = 1;
+        }
+    } else {
+        _queue_event(bd, BD_EVENT_END_OF_TITLE, 0);
+    }
+    bd->end_of_playlist |= 1;
+}
+
 static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
 {
     BD_STREAM *st = &bd->st0;
@@ -2390,8 +2411,7 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
                     st->clip = nav_next_clip(bd->title, st->clip);
                     if (st->clip == NULL) {
                         BD_DEBUG(DBG_BLURAY | DBG_STREAM, "End of title\n");
-                        _queue_event(bd, BD_EVENT_END_OF_TITLE, 0);
-                        bd->end_of_playlist |= 1;
+                        _end_of_title(bd);
                         return 0;
                     }
                     if (!_open_m2ts(bd, st)) {
@@ -2490,8 +2510,7 @@ static int _bd_read_locked(BLURAY *bd, unsigned char *buf, int len, int nav_boun
     if (st->clip == NULL) {
         // We previously reached the last clip.  Nothing
         // else to read.
-        _queue_event(bd, BD_EVENT_END_OF_TITLE, 0);
-        bd->end_of_playlist |= 1;
+        _end_of_title(bd);
         return 0;
     }
 
@@ -2731,6 +2750,7 @@ static int _init_ig_stream(BLURAY *bd)
 
 static void _close_playlist(BLURAY *bd)
 {
+    bd->hdmv_end_pending = 0;
     /* the program left this playlist: whatever it has not been shown yet it
      * will not be shown, so hand it over now (the behaviour without
      * presentation timing) and forget the presented position */
@@ -4246,7 +4266,7 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
     if (bytes == 0) {
 
         // if no next clip (=end of title), resume HDMV VM
-        if (!bd->st0.clip && bd->title_type == title_hdmv) {
+        if (!bd->st0.clip && bd->title_type == title_hdmv && !bd->hdmv_hold_end) {
             hdmv_vm_resume(bd->hdmv_vm);
             bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
             BD_DEBUG(DBG_BLURAY, "bd_read_ext(): reached end of playlist. hdmv_suspended=%d\n", bd->hdmv_suspended);
@@ -4292,6 +4312,31 @@ void bd_set_scr(BLURAY *bd, int64_t pts)
     bd_mutex_lock(&bd->mutex);
     bd->app_scr = 1;
     _set_scr(bd, pts);
+    bd_mutex_unlock(&bd->mutex);
+}
+
+static void _resume_hdmv_end(BLURAY *bd)
+{
+    if (bd->hdmv_end_pending && bd->title_type == title_hdmv) {
+        bd->hdmv_end_pending = 0;
+        hdmv_vm_resume(bd->hdmv_vm);
+        bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
+    }
+}
+
+void bd_hdmv_set_end_hold(BLURAY *bd, int enable)
+{
+    bd_mutex_lock(&bd->mutex);
+    if (!enable)
+        _resume_hdmv_end(bd);
+    bd->hdmv_hold_end = !!enable;
+    bd_mutex_unlock(&bd->mutex);
+}
+
+void bd_hdmv_release_end(BLURAY *bd)
+{
+    bd_mutex_lock(&bd->mutex);
+    _resume_hdmv_end(bd);
     bd_mutex_unlock(&bd->mutex);
 }
 
