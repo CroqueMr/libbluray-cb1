@@ -146,6 +146,14 @@ public class BDRootWindow extends Frame {
         }
     }
 
+    /* flush the whole plane, so a new title starts on the graphics it inherits */
+    public void syncAll() {
+        synchronized (this) {
+            dirty.add(new Rectangle(0, 0, getWidth(), getHeight()));
+            sync();
+        }
+    }
+
     private static class RefreshTimerTask extends TimerTask {
         public RefreshTimerTask(BDRootWindow window) {
             this.window = window;
