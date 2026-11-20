@@ -60,9 +60,13 @@ public class HGraphicsDevice extends HScreenDevice {
     public HGraphicsConfiguration getBestConfiguration(HGraphicsConfigTemplate hgct) {
         int score = -1;
         HGraphicsConfiguration hgc = null;
-        for (int i = 0; i < hgcArray.length; i++)
-            if (hgct.match(hgcArray[i]) > score)
+        for (int i = 0; i < hgcArray.length; i++) {
+            int s = hgct.match(hgcArray[i]);
+            if (s > score) {
+                score = s;
                 hgc = hgcArray[i];
+            }
+        }
         return hgc;
     }
 
@@ -70,9 +74,13 @@ public class HGraphicsDevice extends HScreenDevice {
         int score = -1;
         HGraphicsConfiguration hgc = null;
         for (int i = 0; i < hgcArray.length; i++)
-            for (int j = 0; j < hgcta.length; j++)
-                if (hgcta[j].match(hgcArray[i]) > score)
+            for (int j = 0; j < hgcta.length; j++) {
+                int s = hgcta[j].match(hgcArray[i]);
+                if (s > score) {
+                    score = s;
                     hgc = hgcArray[i];
+                }
+            }
         return hgc;
     }
 
