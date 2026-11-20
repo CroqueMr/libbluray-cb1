@@ -271,6 +271,7 @@ const char *bd_event_name(uint32_t event)
         EVENT_ENTRY(BD_EVENT_KEY_INTEREST_TABLE);
         EVENT_ENTRY(BD_EVENT_UO_MASK_CHANGED);
         EVENT_ENTRY(BD_EVENT_BDJ_GRAPHICS);
+        EVENT_ENTRY(BD_EVENT_HDMV_PROGRAM_END);
 #undef EVENT_ENTRY
     }
     return NULL;
@@ -4160,6 +4161,9 @@ static void _process_hdmv_vm_event(BLURAY *bd, HDMV_EVENT *hev)
             break;
 
         case HDMV_EVENT_END:
+            if (bd->hdmv_hold_end && (bd->end_of_playlist & 1))
+                _queue_event(bd, BD_EVENT_HDMV_PROGRAM_END, 0);
+            break;
         case HDMV_EVENT_NONE:
       //default:
             break;
@@ -4317,7 +4321,7 @@ int bd_bdj_waiting_for_playlist(BLURAY *bd)
 {
     int waiting;
     bd_mutex_lock(&bd->mutex);
-    waiting = bd->title_type == title_bdj && (!bd->title || bd->bdj_wait_start);
+    waiting = bd->title_type == title_bdj && (!bd->st0.clip || bd->bdj_wait_start);
     bd_mutex_unlock(&bd->mutex);
     return waiting;
 }

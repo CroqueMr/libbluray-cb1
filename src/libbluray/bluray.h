@@ -880,7 +880,10 @@ typedef enum {
     /** BD-J graphics shown for the first time since the BD-J loader started the title */
     BD_EVENT_BDJ_GRAPHICS           = 34,  /**< 1 */
 
-    /*BD_EVENT_LAST = 33, */
+    /** HDMV navigation program ended after a held title. */
+    BD_EVENT_HDMV_PROGRAM_END      = 35,
+
+    /*BD_EVENT_LAST = 35, */
 
 } bd_event_e;
 
