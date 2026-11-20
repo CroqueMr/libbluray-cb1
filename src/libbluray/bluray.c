@@ -4321,7 +4321,7 @@ int bd_bdj_waiting_for_playlist(BLURAY *bd)
 {
     int waiting;
     bd_mutex_lock(&bd->mutex);
-    waiting = bd->title_type == title_bdj && (!bd->title || bd->bdj_wait_start);
+    waiting = bd->title_type == title_bdj && (!bd->st0.clip || bd->bdj_wait_start);
     bd_mutex_unlock(&bd->mutex);
     return waiting;
 }
