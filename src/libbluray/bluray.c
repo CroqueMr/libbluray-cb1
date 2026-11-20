@@ -1635,6 +1635,8 @@ static int _bdj_event(BLURAY *bd, unsigned ev, unsigned param)
                 /* a seek re-anchors everything: what was held is history */
                 case BDJ_EVENT_SEEK:
                     _bdj_pt_release(bd, 0, 1);
+                    bd->bdj_pt_position = UINT64_MAX;
+                    bd->bdj_pt_last_psr_time = (uint64_t)param * 2;
                     break;
                 default:
                     break;
@@ -4251,6 +4253,15 @@ void bd_bdj_release_all(BLURAY *bd)
 void bd_bdj_set_playback_time(BLURAY *bd, uint64_t time)
 {
     bd->bdj_pt_position = time;
+}
+
+int64_t bdpriv_bdj_presented_time(BLURAY *bd, uint32_t playlist)
+{
+    if (!bd || !bd->bdj_pt_enabled || bd_psr_read(bd->regs, PSR_PLAYLIST) != playlist)
+        return -1;
+
+    uint64_t time = bd->bdj_pt_position;
+    return time == UINT64_MAX ? -2 : (int64_t)time;
 }
 
 uint64_t bdpriv_bdj_tell_time(BLURAY *bd)

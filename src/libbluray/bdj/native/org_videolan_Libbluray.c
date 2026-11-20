@@ -338,6 +338,12 @@ JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_tellTimeN(JNIEnv * env,
     return bdpriv_bdj_tell_time(bd);
 }
 
+JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_getPresentedTimeN(JNIEnv * env,
+        jclass cls, jlong np, jint playlist) {
+    BLURAY *bd = (BLURAY *)(intptr_t)np;
+    return bdpriv_bdj_presented_time(bd, playlist);
+}
+
 JNIEXPORT jint JNICALL Java_org_videolan_Libbluray_selectRateN(JNIEnv * env,
         jclass cls, jlong np, jfloat rate, jint reason) {
     BLURAY* bd = (BLURAY*)(intptr_t)np;
@@ -699,6 +705,11 @@ Java_org_videolan_Libbluray_methods[] =
         CC("tellTimeN"),
         CC("(J)J"),
         VC(Java_org_videolan_Libbluray_tellTimeN),
+    },
+    {
+        CC("getPresentedTimeN"),
+        CC("(JI)J"),
+        VC(Java_org_videolan_Libbluray_getPresentedTimeN),
     },
     {
         CC("selectRateN"),

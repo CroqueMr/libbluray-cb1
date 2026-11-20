@@ -634,6 +634,11 @@ public class Libbluray {
         return getUOMaskN(nativePointer);
     }
 
+    /** Playlist time in 90 kHz ticks. -1 means disabled; -2 means awaiting presentation. */
+    public static long getPresentedTime(int playlist) {
+        return getPresentedTimeN(nativePointer, playlist);
+    }
+
     public static long tellTime() {
         return tellTimeN(nativePointer);
     }
@@ -884,6 +889,7 @@ public class Libbluray {
     private static native void setUOMaskN(long np, boolean menuCallMask, boolean titleSearchMask);
     private static native void setKeyInterestN(long np, int mask);
     private static native long tellTimeN(long np);
+    private static native long getPresentedTimeN(long np, int playlist);
     private static native int selectRateN(long np, float rate, int reason);
     private static native int writeRegN(long np, int is_psr, int num, int value, int psr_value_mask);
     private static native int readRegN(long np, int is_psr, int num);
