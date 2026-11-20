@@ -57,6 +57,7 @@
 #include <stdio.h> // SEEK_
 #include <stdlib.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <stdatomic.h>
 #include <string.h>
 
@@ -1835,7 +1836,8 @@ void bd_close(BLURAY *bd)
  * PlayMark tracking
  */
 
-static void _find_next_playmark(BLURAY *bd)
+/* Entry-point packets can be shared by marks on both sides of a seek target. */
+static void _find_next_playmark(BLURAY *bd, int last_passed)
 {
     unsigned ii;
 
@@ -1843,7 +1845,7 @@ static void _find_next_playmark(BLURAY *bd)
     bd->next_mark_pos = (uint64_t)-1;
     for (ii = 0; ii < bd->title->mark_list.count; ii++) {
         uint64_t pos = (uint64_t)bd->title->mark_list.mark[ii].title_pkt * 192L;
-        if (pos > bd->s_pos) {
+        if (pos > bd->s_pos || (pos == bd->s_pos && (int)ii > last_passed)) {
             bd->next_mark = ii;
             bd->next_mark_pos = pos;
             break;
@@ -1851,6 +1853,27 @@ static void _find_next_playmark(BLURAY *bd)
     }
 
     _update_chapter_psr(bd);
+}
+
+static int _last_mark_at_time(const NAV_TITLE *title, uint64_t time)
+{
+    int last = -1;
+    for (unsigned i = 0; i < title->mark_list.count; i++) {
+        if (title->mark_list.mark[i].title_time <= time) {
+            last = (int)i;
+        }
+    }
+    return last;
+}
+
+static int _chapter_mark(const NAV_TITLE *title, unsigned chapter)
+{
+    for (unsigned i = 0; i < title->mark_list.count; i++) {
+        if (title->mark_list.mark[i].mark_type == BD_MARK_ENTRY && chapter-- == 0) {
+            return (int)i;
+        }
+    }
+    return INT_MAX;
 }
 
 static void _playmark_reached(BLURAY *bd)
@@ -1882,7 +1905,8 @@ static void _playmark_reached(BLURAY *bd)
  */
 
 static int64_t _seek_internal(BLURAY *bd,
-                           const NAV_CLIP *clip, uint32_t title_pkt, uint32_t clip_pkt)
+                           const NAV_CLIP *clip, uint32_t title_pkt, uint32_t clip_pkt,
+                           int last_passed_mark)
 {
     int64_t result;
 
@@ -1904,7 +1928,7 @@ static int64_t _seek_internal(BLURAY *bd,
         _bdj_event(bd, BDJ_EVENT_SEEK, media_time);
 
         /* playmark tracking */
-        _find_next_playmark(bd);
+        _find_next_playmark(bd, last_passed_mark);
 
         /* reset PG decoder and controller */
         if (bd->graphics_controller) {
@@ -1964,7 +1988,7 @@ static int64_t _seek_time(BLURAY *bd, uint64_t tick, uint8_t is_uo_mask_checked)
         // Find the closest access unit to the requested position
         clip = nav_time_search(bd->title, (uint32_t)tick, &clip_pkt, &out_pkt);
 
-        _seek_internal(bd, clip, out_pkt, clip_pkt);
+        _seek_internal(bd, clip, out_pkt, clip_pkt, _last_mark_at_time(bd->title, tick));
 
     } else {
         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_seek_time(%" PRIu64 ") failed\n", tick);
@@ -2037,7 +2061,7 @@ int64_t bd_seek_chapter(BLURAY *bd, unsigned chapter)
             // Find the closest access unit to the requested position
             clip = nav_chapter_search(bd->title, chapter, &clip_pkt, &out_pkt);
 
-            _seek_internal(bd, clip, out_pkt, clip_pkt);
+            _seek_internal(bd, clip, out_pkt, clip_pkt, _chapter_mark(bd->title, chapter));
             ret_pos = bd->s_pos; // Update
         }
     } else {
@@ -2100,7 +2124,7 @@ int64_t bd_seek_playitem(BLURAY *bd, unsigned clip_ref)
       clip_pkt = clip->start_pkt;
       out_pkt  = clip->title_pkt;
 
-      _seek_internal(bd, clip, out_pkt, clip_pkt);
+      _seek_internal(bd, clip, out_pkt, clip_pkt, _last_mark_at_time(bd->title, clip->title_time));
 
     } else {
         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_seek_playitem(%u) failed\n", clip_ref);
@@ -2126,14 +2150,7 @@ int64_t bd_seek_mark(BLURAY *bd, unsigned mark)
         // Find the closest access unit to the requested position
         clip = nav_mark_search(bd->title, mark, &clip_pkt, &out_pkt);
 
-        /* Distinct mark times can share one access packet. A mark seek
-         * consumes its target, not the later marks in that same packet. */
-        if (_seek_internal(bd, clip, out_pkt, clip_pkt) >= 0 &&
-            mark + 1 < bd->title->mark_list.count &&
-            (uint64_t)bd->title->mark_list.mark[mark + 1].title_pkt * 192L == bd->s_pos) {
-            bd->next_mark = mark + 1;
-            bd->next_mark_pos = bd->s_pos;
-        }
+        _seek_internal(bd, clip, out_pkt, clip_pkt, (int)mark);
 
     } else {
         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_seek_mark(%u) failed\n", mark);
@@ -2161,7 +2178,7 @@ int64_t bd_seek(BLURAY *bd, uint64_t pos)
         // Find the closest access unit to the requested position
         clip = nav_packet_search(bd->title, pkt, &clip_pkt, &out_pkt, &out_time);
 
-        _seek_internal(bd, clip, out_pkt, clip_pkt);
+        _seek_internal(bd, clip, out_pkt, clip_pkt, INT_MAX);
     }
 
     bd_mutex_unlock(&bd->mutex);
@@ -2227,7 +2244,9 @@ static int64_t _clip_seek_time(BLURAY *bd, uint32_t tick)
     // Find the closest access unit to the requested position
     nav_clip_time_search(bd->st0.clip, tick, &clip_pkt, &out_pkt);
 
-    _seek_internal(bd, bd->st0.clip, out_pkt, clip_pkt);
+    const NAV_CLIP *clip = bd->st0.clip;
+    uint64_t time = (uint64_t)clip->title_time + (tick > clip->in_time ? tick - clip->in_time : 0);
+    _seek_internal(bd, clip, out_pkt, clip_pkt, _last_mark_at_time(bd->title, time));
 
     return bd->s_pos;
 }
@@ -2744,7 +2763,7 @@ static int _open_playlist(BLURAY *bd, unsigned playlist, unsigned angle)
     if (_open_m2ts(bd, &bd->st0)) {
         BD_DEBUG(DBG_BLURAY, "Title %s selected\n", f_name);
 
-        _find_next_playmark(bd);
+        _find_next_playmark(bd, INT_MAX);
 
         _preload_subpaths(bd);
 
