@@ -877,6 +877,9 @@ typedef enum {
     /** UO mask changed */
     BD_EVENT_UO_MASK_CHANGED        = 33,  /**< bitmask, BLURAY_UO_* */
 
+    /** BD-J graphics shown for the first time since the BD-J loader started the title */
+    BD_EVENT_BDJ_GRAPHICS           = 34,  /**< 1 */
+
     /*BD_EVENT_LAST = 33, */
 
 } bd_event_e;
