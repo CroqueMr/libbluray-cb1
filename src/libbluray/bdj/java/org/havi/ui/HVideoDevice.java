@@ -55,9 +55,13 @@ public class HVideoDevice extends HScreenDevice {
     public HVideoConfiguration getBestConfiguration(HVideoConfigTemplate hvct) {
         int score = -1;
         HVideoConfiguration hvc = null;
-        for (int i = 0; i < hvcArray.length; i++)
-            if (hvct.match(hvcArray[i]) > score)
+        for (int i = 0; i < hvcArray.length; i++) {
+            int s = hvct.match(hvcArray[i]);
+            if (s > score) {
+                score = s;
                 hvc = hvcArray[i];
+            }
+        }
         return hvc;
     }
 
@@ -65,9 +69,13 @@ public class HVideoDevice extends HScreenDevice {
         int score = -1;
         HVideoConfiguration hvc = null;
         for (int i = 0; i < hvcArray.length; i++) 
-            for (int j = 0; j < hvcta.length; j++)
-                if (hvcta[j].match(hvcArray[i]) > score)
+            for (int j = 0; j < hvcta.length; j++) {
+                int s = hvcta[j].match(hvcArray[i]);
+                if (s > score) {
+                    score = s;
                     hvc = hvcArray[i];
+                }
+            }
         return hvc;
     }
 

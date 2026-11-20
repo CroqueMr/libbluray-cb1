@@ -57,9 +57,13 @@ public class HBackgroundDevice extends HScreenDevice {
     public HBackgroundConfiguration getBestConfiguration(HBackgroundConfigTemplate hbct) {
         int score = -1;
         HBackgroundConfiguration hbc = null;
-        for (int i = 0; i < hbcArray.length; i++)
-            if (hbct.match(hbcArray[i]) > score)
+        for (int i = 0; i < hbcArray.length; i++) {
+            int s = hbct.match(hbcArray[i]);
+            if (s > score) {
+                score = s;
                 hbc = hbcArray[i];
+            }
+        }
         return hbc;
     }
 
@@ -67,9 +71,13 @@ public class HBackgroundDevice extends HScreenDevice {
         int score = -1;
         HBackgroundConfiguration hbc = null;
         for (int i = 0; i < hbcArray.length; i++)
-            for (int j = 0; j < hbcta.length; j++)
-                if (hbcta[j].match(hbcArray[i]) > score)
+            for (int j = 0; j < hbcta.length; j++) {
+                int s = hbcta[j].match(hbcArray[i]);
+                if (s > score) {
+                    score = s;
                     hbc = hbcArray[i];
+                }
+            }
         return hbc;
     }
 
