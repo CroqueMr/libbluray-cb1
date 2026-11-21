@@ -21,6 +21,7 @@ package org.videolan;
 
 import java.awt.BDRootWindow;
 import java.awt.Component;
+import java.awt.Dimension;
 
 import org.havi.ui.HScene;
 
@@ -50,6 +51,14 @@ public class GUIManager extends BDRootWindow {
             }
             return instance;
         }
+    }
+
+    public static Dimension currentSize() {
+        GUIManager gui;
+        synchronized (instanceLock) {
+            gui = instance;
+        }
+        return gui == null ? null : gui.getSize();
     }
 
     BDJXletContext getFocusHSceneContext() {

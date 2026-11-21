@@ -198,12 +198,30 @@ public class Handler extends BDHandler {
         }
     }
 
+    public Time getMediaTime() {
+        return new Time(getMediaNanoseconds());
+    }
+
+    public long getMediaNanoseconds() {
+        synchronized (this) {
+            if (state == Started && rate != 0.0f && currentLocator != null) {
+                long ticks = Libbluray.getPresentedTime(currentLocator.getPlayListId());
+                if (ticks >= 0)
+                    return (long)(ticks * TO_SECONDS * 1000000000.0d);
+                if (ticks == -2)
+                    return baseMediaTime;
+            }
+            return super.getMediaNanoseconds();
+        }
+    }
+
     protected ControllerErrorEvent doStop(boolean eof) {
+        ControllerErrorEvent result = super.doStop(eof);
         Libbluray.selectRate(0.0f, false);
         if (!eof) {
             Libbluray.stopPlaylist();
         }
-        return super.doStop(eof);
+        return result;
     }
 
     protected void doSeekTime(Time at) {
