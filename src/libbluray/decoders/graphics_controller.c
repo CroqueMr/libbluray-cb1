@@ -76,6 +76,7 @@ struct graphics_controller_s {
     /* state */
     unsigned        ig_open;
     unsigned        ig_drawn;
+    unsigned        ig_kept;   /* IG plane left on screen by a reset until GC_CTRL_IG_CLOSE */
     unsigned        ig_dirty;
     unsigned        pg_open;
     unsigned        pg_drawn;
@@ -475,6 +476,7 @@ static void _open_osd(GRAPHICS_CONTROLLER *gc, int plane,
 
         if (plane == BD_OVERLAY_IG) {
             gc->ig_open = 1;
+            gc->ig_kept = 0;
         } else {
             gc->pg_open = 1;
         }
@@ -495,6 +497,7 @@ static void _close_osd(GRAPHICS_CONTROLLER *gc, int plane)
     if (plane == BD_OVERLAY_IG) {
         gc->ig_open = 0;
         gc->ig_drawn = 0;
+        gc->ig_kept = 0;
     } else {
         gc->pg_open = 0;
         gc->pg_drawn = 0;
@@ -728,12 +731,13 @@ static void _select_page(GRAPHICS_CONTROLLER *gc, uint16_t page_id, int out_effe
     }
 }
 
-static void _gc_reset(GRAPHICS_CONTROLLER *gc)
+static void _gc_reset_ig(GRAPHICS_CONTROLLER *gc, int keep_ig)
 {
-    if (gc->pg_open) {
-        _close_osd(gc, BD_OVERLAY_PG);
-    }
-    if (gc->ig_open) {
+    if (keep_ig && (gc->ig_open || gc->ig_kept)) {
+        gc->ig_kept  = 1;
+        gc->ig_open  = 0;
+        gc->ig_drawn = 0;
+    } else if (gc->ig_open || gc->ig_kept) {
         _close_osd(gc, BD_OVERLAY_IG);
     }
 
@@ -742,18 +746,27 @@ static void _gc_reset(GRAPHICS_CONTROLLER *gc)
     gc->page_uo_mask = uo_mask_get_empty();
 
     graphics_processor_free(&gc->igp);
+    pg_display_set_free(&gc->igs);
+    memset(gc->bog_data, 0, sizeof(gc->bog_data));
+}
+
+static int _gc_reset(GRAPHICS_CONTROLLER *gc, int keep_ig)
+{
+    if (gc->pg_open)
+        _close_osd(gc, BD_OVERLAY_PG);
+    _gc_reset_ig(gc, keep_ig);
+
     graphics_processor_free(&gc->pgp);
     graphics_processor_free(&gc->tgp);
 
     pg_display_set_free(&gc->pgs);
-    pg_display_set_free(&gc->igs);
     pg_display_set_free(&gc->tgs);
 
     textst_render_free(&gc->textst_render);
     gc->next_dialog_idx = 0;
     gc->textst_user_style = -1;
 
-    memset(gc->bog_data, 0, sizeof(gc->bog_data));
+    return gc->ig_kept;
 }
 
 /*
@@ -828,7 +841,7 @@ void gc_free(GRAPHICS_CONTROLLER **p)
 
         bd_psr_unregister_cb(gc->regs, _process_psr_event, gc);
 
-        _gc_reset(gc);
+        _gc_reset(gc, 0);
 
         if (gc->overlay_proc) {
             gc->overlay_proc(gc->overlay_proc_handle, NULL);
@@ -936,6 +949,44 @@ int gc_decode_ts(GRAPHICS_CONTROLLER *gc, uint16_t pid, uint8_t *block, unsigned
     }
 
     return -1;
+}
+
+void gc_queue_ts(GRAPHICS_CONTROLLER *gc, uint16_t pid, uint8_t *block, unsigned num_blocks, unsigned src)
+{
+    if (!gc || !IS_HDMV_PID_IG(pid)) {
+        return;
+    }
+
+    if (!gc->igp) {
+        gc->igp = graphics_processor_init();
+        if (!gc->igp) {
+            return;
+        }
+    }
+
+    bd_mutex_lock(&gc->mutex);
+    graphics_processor_queue_ts(gc->igp, pid, block, num_blocks, src);
+    bd_mutex_unlock(&gc->mutex);
+}
+
+int64_t gc_ig_pts(GRAPHICS_CONTROLLER *gc, unsigned *src)
+{
+    int64_t pts = -1;
+
+    if (!gc) {
+        return -1;
+    }
+
+    bd_mutex_lock(&gc->mutex);
+    if (gc->igs && gc->igs->ics && gc->igs->complete) {
+        pts = gc->igs->ics->pts;
+        if (src) {
+            *src = gc->igs->ics_src;
+        }
+    }
+    bd_mutex_unlock(&gc->mutex);
+
+    return pts;
 }
 
 /*
@@ -1961,7 +2012,20 @@ int gc_run(GRAPHICS_CONTROLLER *gc, gc_ctrl_e ctrl, uint32_t param, GC_NAV_CMDS 
     /* always accept reset */
     switch (ctrl) {
         case GC_CTRL_RESET:
-            _gc_reset(gc);
+            result = _gc_reset(gc, param);
+
+            bd_mutex_unlock(&gc->mutex);
+            return result;
+
+        case GC_CTRL_IG_RESET:
+            _gc_reset_ig(gc, 0);
+            bd_mutex_unlock(&gc->mutex);
+            return 0;
+
+        case GC_CTRL_IG_CLOSE:
+            if (gc->ig_kept) {
+                _close_osd(gc, BD_OVERLAY_IG);
+            }
 
             bd_mutex_unlock(&gc->mutex);
             return 0;
@@ -2066,6 +2130,8 @@ int gc_run(GRAPHICS_CONTROLLER *gc, gc_ctrl_e ctrl, uint32_t param, GC_NAV_CMDS 
          * but not handled here.
          */
         case GC_CTRL_RESET:
+        case GC_CTRL_IG_CLOSE:
+        case GC_CTRL_IG_RESET:
         case GC_CTRL_PG_RESET:
         case GC_CTRL_PG_UPDATE:
         case GC_CTRL_PG_CHARCODE:

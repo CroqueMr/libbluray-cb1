@@ -46,7 +46,7 @@ typedef enum {
     /* */
     GC_CTRL_INIT_MENU,       /* */
     GC_CTRL_NOP,             /* No input. Render page / run timers / run animations */
-    GC_CTRL_RESET,           /* reset graphics controller */
+    GC_CTRL_RESET,           /* reset graphics controller, param: 1 to keep the IG plane on screen */
 
     /* user input */
     GC_CTRL_VK_KEY,          /* param: bd_vk_key_e */
@@ -58,6 +58,8 @@ typedef enum {
     GC_CTRL_SET_BUTTON_PAGE,
     GC_CTRL_POPUP,           /* param: on/off */
     GC_CTRL_IG_END,          /* execution of IG object is complete */
+    GC_CTRL_IG_CLOSE,        /* close the IG plane kept by GC_CTRL_RESET */
+    GC_CTRL_IG_RESET,        /* reset IG without disturbing subtitles */
 
     /* PG */
     GC_CTRL_PG_UPDATE,       /* render decoded PG composition */
@@ -117,6 +119,15 @@ BD_PRIVATE int                  gc_decode_ts(GRAPHICS_CONTROLLER *p,
                                              uint16_t pid,
                                              uint8_t *block, unsigned num_blocks,
                                              int64_t stc);
+
+/* queue IG data read from source src for a later gc_decode_ts(p, pid, NULL, 0, -1) */
+BD_PRIVATE void                 gc_queue_ts(GRAPHICS_CONTROLLER *p,
+                                            uint16_t pid,
+                                            uint8_t *block, unsigned num_blocks,
+                                            unsigned src);
+
+/* pts of the complete IG composition (90 kHz), -1 if none. src is set to its source */
+BD_PRIVATE int64_t              gc_ig_pts(GRAPHICS_CONTROLLER *p, unsigned *src);
 
 /*
  * run graphics controller
