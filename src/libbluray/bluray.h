@@ -880,7 +880,10 @@ typedef enum {
     /** BD-J graphics shown for the first time since the BD-J loader started the title */
     BD_EVENT_BDJ_GRAPHICS           = 34,  /**< 1 */
 
-    /*BD_EVENT_LAST = 33, */
+    /** HDMV navigation program ended after a held title. */
+    BD_EVENT_HDMV_PROGRAM_END      = 35,
+
+    /*BD_EVENT_LAST = 35, */
 
 } bd_event_e;
 
@@ -1143,6 +1146,26 @@ BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
  * register writes by the application, seeks and title changes are unaffected;
  * anything held is released before a seek, a playlist change or a title change.
  */
+#define BD_BDJ_WAITING_FOR_PLAYLIST 1
+
+/** Whether the current BD-J title has no readable playlist yet. */
+BD_PUBLIC int bd_bdj_waiting_for_playlist(BLURAY *bd);
+
+#define BD_HDMV_GRAPHICS_HOLD 1
+/* Deliver HDMV interactive graphics once the 90 kHz title time is presented. */
+BD_PUBLIC void bd_hdmv_set_graphics_hold(BLURAY *bd, int enable);
+BD_PUBLIC void bd_hdmv_presented(BLURAY *bd, uint32_t epoch, int64_t title_time);
+
+#define BD_HDMV_END_HOLD 1
+
+/**
+ * With the hold enabled, BD_EVENT_END_OF_TITLE carries 1 for an HDMV title.
+ * Release it after presenting the last pictures. The next bd_read_ext()
+ * can then run the resumed HDMV program.
+ */
+BD_PUBLIC void bd_hdmv_set_end_hold(BLURAY *bd, int enable);
+BD_PUBLIC void bd_hdmv_release_end(BLURAY *bd);
+
 #define BD_BDJ_PRESENTATION_TIMING 1
 
 /**
@@ -1169,6 +1192,11 @@ BD_PUBLIC void     bd_bdj_release_all(BLURAY *bd);
 #define BD_BDJ_PLAYBACK_CLOCK 1
 /* Publish the player's presented position on the current playlist (90 kHz). */
 BD_PUBLIC void     bd_bdj_set_playback_time(BLURAY *bd, uint64_t time);
+
+#define BD_BDJ_PLAYBACK_CLOCK_EPOCH 1
+/* A playlist replacement or seek invalidates the caller's old presentation samples. */
+BD_PUBLIC uint32_t bd_bdj_get_clock_epoch(BLURAY *bd);
+BD_PUBLIC void bd_bdj_set_playback_time_at_epoch(BLURAY *bd, uint32_t epoch, uint64_t time);
 
 /**
  *

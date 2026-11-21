@@ -91,6 +91,13 @@ typedef struct {
     uint8_t         encrypted_block_cnt;
     uint8_t         seek_flag;  /* used to fine-tune first read after seek */
 
+    /* the Dolby Vision enhancement layer before the entry point the clip is read from (_dv_lead()) */
+    uint8_t         lead_check;   /* look for it before the next read */
+    uint16_t        lead_base_pid;
+    uint16_t        lead_pid;     /* the enhancement layer's PID in the clip, 0 if it has none */
+    uint32_t        lead_end_spn; /* the packets before this one are of the lead: of them only the
+                                     enhancement layer (and PAT, PMT, PCR) is given */
+
     M2TS_FILTER    *m2ts_filter;
 } BD_STREAM;
 
@@ -158,6 +165,8 @@ struct bluray {
     uint8_t         bdj_pt_releasing;
     uint32_t        bdj_pt_seq, bdj_pt_advertised_seq;
     atomic_uint_least64_t bdj_pt_position; /* player's playlist time, 90 kHz */
+    atomic_uint_least32_t bdj_pt_clock_epoch;
+    atomic_uchar bdj_pt_has_video;
     atomic_uint_least64_t bdj_pt_last_psr_time;
     /* PSR 5 (chapter) and 7 (playitem) as presented. The registers themselves
      * are written at read time - the reader, the graphics controller and the
@@ -188,6 +197,18 @@ struct bluray {
     uint8_t         bdj_psr_write;
 
     /* First visible BD-J graphics of the title started by the loader. */
+    uint8_t         hdmv_hold_end;
+    uint8_t         hdmv_hold_graphics;
+    uint8_t         hdmv_ig_kept;
+    uint8_t         hdmv_ig_read;
+    unsigned        hdmv_ig_count;
+    uint16_t        hdmv_ig_pid;
+    int64_t         hdmv_ig_due;
+    struct {
+        gc_ctrl_e command;
+        uint32_t param;
+    } hdmv_ig_queue[64];
+    uint8_t         hdmv_end_pending;
     BD_MUTEX        gfx_mutex;
     uint8_t         gfx_pending;
     uint8_t         gfx_scan_all;
@@ -269,6 +290,7 @@ const char *bd_event_name(uint32_t event)
         EVENT_ENTRY(BD_EVENT_KEY_INTEREST_TABLE);
         EVENT_ENTRY(BD_EVENT_UO_MASK_CHANGED);
         EVENT_ENTRY(BD_EVENT_BDJ_GRAPHICS);
+        EVENT_ENTRY(BD_EVENT_HDMV_PROGRAM_END);
 #undef EVENT_ENTRY
     }
     return NULL;
@@ -308,6 +330,7 @@ static void _bdj_pt_release(BLURAY *bd, uint32_t upto, int all);
 static void _bdj_pt_reset(BLURAY *bd)
 {
     bd->bdj_pt_position = UINT64_MAX;
+    bd->bdj_pt_clock_epoch++;
     bd->bdj_pt_last_psr_time = UINT64_MAX;
     bd->bdj_pt_playitem = UINT32_MAX;
     bd->bdj_pt_chapter = UINT32_MAX;
@@ -728,6 +751,10 @@ static int _open_m2ts(BLURAY *bd, BD_STREAM *st)
     st->clip_block_pos = (st->clip_pos / 6144) * 6144;
     st->eof_hit = 0;
     st->encrypted_block_cnt = 0;
+    st->lead_end_spn = 0;
+    st->lead_pid = 0;
+    st->lead_base_pid = 0;
+    st->lead_check = 0;
 
     if (st->fp) {
         int64_t clip_size = file_size(st->fp);
@@ -746,9 +773,20 @@ static int _open_m2ts(BLURAY *bd, BD_STREAM *st)
                 const MPLS_PL *pl = st->clip->title->pl;
                 const MPLS_STN *stn = &pl->play_item[st->clip->ref].stn;
 
+                bd->bdj_pt_has_video = stn->num_video != 0;
                 st->uo_mask = uo_mask_combine(pl->app_info.uo_mask,
                                               pl->play_item[st->clip->ref].uo_mask);
                 _update_uo_mask(bd);
+
+                /* the Dolby Vision enhancement layer in the clip's own transport stream */
+                if (bd->dv_video_preroll && stn->num_video == 1 && stn->video &&
+                    stn->video[0].coding_type == 0x24 && stn->num_dv == 1 && stn->dv &&
+                    stn->dv[0].coding_type == 0x24 && stn->dv[0].stream_type == 1) {
+                    st->lead_base_pid = stn->video[0].pid;
+                    st->lead_pid = stn->dv[0].pid;
+                    st->lead_check = st->clip->start_pkt != 0 &&
+                                     st->clip->connection != CONNECT_SEAMLESS;
+                }
 
                 st->m2ts_filter = m2ts_filter_init((int64_t)st->clip->in_time << 1,
                                                    (int64_t)st->clip->out_time << 1,
@@ -858,6 +896,26 @@ static int _read_block(BLURAY *bd, BD_STREAM *st, uint8_t *buf)
                     BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Skipping broken unit at %" PRId64 "\n", st->clip_block_pos - len);
                     st->clip_pos += len;
                     return error;
+                }
+
+                /* the lead before an entry point: only the enhancement layer of Dolby Vision passes
+                   (and PAT, PMT, PCR); the filter sees the rest wiped */
+                if (BD_UNLIKELY(st->lead_end_spn)) {
+                    uint32_t spn = SPN(st->clip_block_pos - len);
+                    unsigned ii;
+                    for (ii = 0; ii < len / 192; ii++, spn++) {
+                        uint8_t *p = buf + ii * 192;
+                        uint16_t pid;
+                        if (spn >= st->lead_end_spn) {
+                            st->lead_end_spn = 0;
+                            break;
+                        }
+                        pid = TS_PID(p);
+                        if (pid >= HDMV_PID_VIDEO && pid != st->lead_pid) {
+                            p[4 + 2] = 0xff;
+                            p[4 + 1] |= 0x1f;
+                        }
+                    }
                 }
 
                 if (st->m2ts_filter) {
@@ -971,6 +1029,19 @@ static int _preload_m2ts(BLURAY *bd, BD_PRELOAD *p)
     return 1;
 }
 
+static void _reset_hdmv_graphics(BLURAY *bd, int keep_plane)
+{
+    bd->hdmv_ig_count = 0;
+    bd->hdmv_ig_pid = 0;
+    bd->hdmv_ig_kept = 0;
+    bd->hdmv_ig_read = 0;
+    if (bd->graphics_controller)
+        bd->hdmv_ig_kept = gc_run(bd->graphics_controller, GC_CTRL_RESET, keep_plane, NULL) > 0;
+}
+
+static int _init_ig_stream(BLURAY *bd);
+static void _hdmv_graphics_init(BLURAY *bd, int preloaded);
+
 static int64_t _seek_stream(BLURAY *bd, BD_STREAM *st,
                             const NAV_CLIP *clip, uint32_t clip_pkt)
 {
@@ -998,15 +1069,160 @@ static int64_t _seek_stream(BLURAY *bd, BD_STREAM *st,
 
     st->int_buf_off = 6144;
     st->seek_flag = 1;
+    /* a seek lands on an entry point */
+    st->lead_end_spn = 0;
+    st->lead_check = st->lead_pid != 0;
 
     return st->clip_pos;
+}
+
+/*
+ * The Dolby Vision enhancement layer before an entry point.
+ *
+ * An entry point of the EP map is the first packet of a random-access picture of the base layer
+ * (the clip's first video stream). The enhancement layer (PID 0x1015 on a disc) has an access unit
+ * of the same picture, and a multiplexer may put it before the base layer's: a reading that starts
+ * at the entry point (a seek, a chapter, a mark, a play item that is not joined seamlessly) then
+ * gets the enhancement layer only from its next random-access picture, and a player that adds the
+ * layer gives the pictures until then without it.
+ *
+ * Before the first read from an entry point of a clip with an enhancement layer, the packets before
+ * it are looked through backwards for the enhancement layer's access unit that is decoded with the
+ * base layer's picture: the one with its DTS (a disc gives the two access units of a picture the
+ * same times, and a player joins the layers by the decoding time; the layers of a stream whose
+ * pictures are presented in different orders have the same DTS, not the same PTS). The look ends at
+ * the first access unit of the enhancement layer decoded before the base layer's picture (a PID's
+ * packets are in decoding order: the one decoded with the picture comes after it, it was not before
+ * the entry point), and in any case once the packets' arrival times are LEAD_MAX_ATS before the
+ * entry point's. The T-STD of ISO/IEC 13818-1 keeps no data in its buffers for more than
+ * one second (2.4.2.6), and the base layer's picture arrives at the latest at its decoding time, the
+ * enhancement layer's at the earliest one second before the same decoding time: they arrive at most
+ * one second apart. Where the access unit is found, the reading starts there, and of the packets
+ * before the entry point only the enhancement layer (and PAT, PMT, PCR) is given: the base layer,
+ * audio and graphics start at the entry point as before. The title position goes back by as much, so
+ * that it is still the entry point's once the lead is read.
+ */
+
+#define LEAD_READ_PACKETS (32u * 32)
+#define LEAD_MAX_ATS     (27000000u * 3 / 2)  /* 1.5 s at 27 MHz: one second (T-STD), and half of it */
+#define LEAD_MAX_PACKETS (24u * 1024 * 1024 / 192)  /* and never more than 24 MiB (1.5 s at 128 Mbit/s) */
+
+static int _pes_times(const uint8_t *p, int64_t *pts, int64_t *dts)
+{
+    /* p: a source packet that starts a PES packet */
+    const uint8_t *ts = p + 4;
+    unsigned off = 4;
+    if (ts[3] & 0x20) {
+        off += 1 + ts[4];
+    }
+    if (!(ts[3] & 0x10) || off + 14 > 188) {
+        return 0;
+    }
+    const uint8_t *pes = ts + off;
+    if (pes[0] || pes[1] || pes[2] != 1 || !(pes[7] & 0x80) || pes[8] < 5 ||
+        ((pes[7] & 0x40) && (pes[8] < 10 || off + 19 > 188))) {
+        return 0;
+    }
+#define _PES_TS(b) ((((int64_t)(b)[0] & 0x0e) << 29) | ((b)[1] << 22) | (((b)[2] & 0xfe) << 14) | \
+                    ((b)[3] << 7) | (((b)[4] & 0xfe) >> 1))
+    *pts = _PES_TS(pes + 9);
+    *dts = (pes[7] & 0x40) && off + 19 <= 188 ? _PES_TS(pes + 14) : *pts;
+#undef _PES_TS
+    return 1;
+}
+
+static int _dv_lead(BLURAY *bd, BD_STREAM *st)
+{
+    uint32_t ep = SPN(st->clip_pos);
+    uint8_t *unit;
+    int64_t unit_spn = -1;
+    int64_t base_pts, base_dts, pts, dts, delta;
+    uint32_t ep_ats, spn, found = 0, scanned = 0;
+    int have = 0;
+
+    if (!st->lead_pid || ep == 0 || !st->fp) {
+        return 0;
+    }
+    unit = malloc(LEAD_READ_PACKETS * 192);
+    if (!unit) {
+        return 0;
+    }
+
+    /* the base layer's random-access picture at the entry point */
+    unit_spn = (ep / 32) * 32;
+    if (file_seek(st->fp, (int64_t)unit_spn * 192, SEEK_SET) < 0 || file_read(st->fp, unit, 6144) != 6144) {
+        goto done;
+    }
+    {
+        const uint8_t *p = unit + (ep % 32) * 192;
+        if (p[4] != 0x47 || TS_PID(p) != st->lead_base_pid || !(p[4 + 1] & 0x40) ||
+            !_pes_times(p, &base_pts, &base_dts)) {
+            goto done;
+        }
+        ep_ats = ((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]) & 0x3fffffff;
+    }
+
+    for (spn = ep; spn > 0 && scanned < LEAD_MAX_PACKETS; scanned++) {
+        const uint8_t *p;
+        uint32_t ats;
+        spn--;
+        if (spn < unit_spn) {
+            unsigned packets = unit_spn < LEAD_READ_PACKETS ? (unsigned)unit_spn : LEAD_READ_PACKETS;
+            int64_t bytes = (int64_t)packets * 192;
+            unit_spn -= packets;
+            if (file_seek(st->fp, unit_spn * 192, SEEK_SET) < 0 ||
+                file_read(st->fp, unit, bytes) != bytes) {
+                break;
+            }
+        }
+        p = unit + (spn - unit_spn) * 192;
+        if (p[4] != 0x47) {
+            break;
+        }
+        ats = ((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]) & 0x3fffffff;
+        if (((ep_ats - ats) & 0x3fffffff) > LEAD_MAX_ATS) {
+            break;
+        }
+        if (TS_PID(p) != st->lead_pid || !(p[4 + 1] & 0x40) || !_pes_times(p, &pts, &dts)) {
+            continue;
+        }
+        /* the layer's access unit decoded with the picture, or one decoded before it (on the
+           33-bit clock): then the picture's own is not before the entry point */
+        delta = (dts - base_dts) & ((INT64_C(1) << 33) - 1);
+        if (delta == 0) {
+            found = spn;
+            have = 1;
+            break;
+        }
+        if (delta >= (INT64_C(1) << 32)) {
+            break;
+        }
+    }
+
+    if (have && (uint64_t)(ep - found) * 192 <= bd->s_pos) {
+        BD_DEBUG(DBG_BLURAY, "clip %s: the enhancement layer's picture of the entry point %u starts %u packets before it\n",
+                 st->clip->name, ep, ep - found);
+        st->clip_pos = (uint64_t)found * 192;
+        st->clip_block_pos = (st->clip_pos / 6144) * 6144;
+        bd->s_pos -= (uint64_t)(ep - found) * 192;
+        st->lead_end_spn = ep;
+    }
+
+done:
+    X_FREE(unit);
+    if (file_seek(st->fp, st->clip_block_pos, SEEK_SET) < 0) {
+        BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Unable to restore seek position in clip %s!\n",
+                 st->clip->name);
+        return -1;
+    }
+    return 0;
 }
 
 /*
  * Graphics controller interface
  */
 
-static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
+static int _run_gc_with_nav(BLURAY *bd, gc_ctrl_e msg, uint32_t param, int *nav)
 {
     int result = -1;
 
@@ -1020,6 +1236,8 @@ static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
         result = gc_run(bd->graphics_controller, msg, param, &cmds);
 
         if (cmds.num_nav_cmds > 0) {
+            if (nav)
+                *nav = 1;
             hdmv_vm_set_object(bd->hdmv_vm, cmds.num_nav_cmds, cmds.nav_cmds);
             bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
         }
@@ -1053,6 +1271,11 @@ static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
     }
 
     return result;
+}
+
+static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
+{
+    return _run_gc_with_nav(bd, msg, param, NULL);
 }
 
 /*
@@ -1446,7 +1669,7 @@ static int _argb_visible(const unsigned *img, int stride, int x0, int y0, int x1
     int x, y;
 
     for (y = y0; y <= y1; y++) {
-        const unsigned *line = img + y * stride;
+        const unsigned *line = img + (size_t)y * stride;
         for (x = x0; x <= x1; x++) {
             if (line[x] & 0xff000000) {
                 return 1;
@@ -1456,14 +1679,14 @@ static int _argb_visible(const unsigned *img, int stride, int x0, int y0, int x1
     return 0;
 }
 
-static void _check_bdj_graphics(BLURAY *bd, const unsigned *img, int w, int h,
+void bdpriv_bdj_report_graphics(BLURAY *bd, const unsigned *img, int w, int h,
                                 int x0, int y0, int x1, int y1)
 {
     bd_mutex_lock(&bd->gfx_mutex);
 
-    if (bd->gfx_pending) {
+    if (bd->gfx_pending && bd->argb_overlay_proc) {
         int stride = w;
-        int scan_all = bd->gfx_scan_all;
+        int scan_all = bd->gfx_scan_all && !bd->argb_buffer;
 
         if (bd->argb_buffer && (bd->argb_buffer->width < w || bd->argb_buffer->height < h)) {
             /* the app buffer holds only the dirty area, at its origin */
@@ -1553,8 +1776,6 @@ void bdpriv_bdj_osd_cb(BLURAY *bd, const unsigned *img, int w, int h,
         bd->argb_buffer->dirty[BD_OVERLAY_IG].y0 = y0;
         bd->argb_buffer->dirty[BD_OVERLAY_IG].y1 = y1;
     }
-
-    _check_bdj_graphics(bd, img, w, h, x0, y0, x1, y1);
 
     /* draw */
     aov.cmd = BD_ARGB_OVERLAY_DRAW;
@@ -1706,6 +1927,7 @@ static int _bdj_event(BLURAY *bd, unsigned ev, unsigned param)
                 case BDJ_EVENT_SEEK:
                     _bdj_pt_release(bd, 0, 1);
                     bd->bdj_pt_position = UINT64_MAX;
+                    bd->bdj_pt_clock_epoch++;
                     bd->bdj_pt_last_psr_time = (uint64_t)param * 2;
                     break;
                 default:
@@ -1756,6 +1978,8 @@ BLURAY *bd_init(void)
 
     atomic_init(&bd->bdj_pt_enabled, 0);
     atomic_init(&bd->bdj_pt_position, UINT64_MAX);
+    atomic_init(&bd->bdj_pt_clock_epoch, 1);
+    atomic_init(&bd->bdj_pt_has_video, 0);
     atomic_init(&bd->bdj_pt_last_psr_time, UINT64_MAX);
     atomic_init(&bd->bdj_pt_playitem, UINT32_MAX);
     atomic_init(&bd->bdj_pt_chapter, UINT32_MAX);
@@ -1990,6 +2214,22 @@ static int64_t _seek_internal(BLURAY *bd,
 
         /* update title position */
         bd->s_pos = (uint64_t)title_pkt * 192;
+        if (bd->title_type == title_hdmv) {
+            if (bd->hdmv_hold_graphics) {
+                bd->bdj_pt_clock_epoch++;
+                bd->hdmv_ig_count = 0;
+                bd->hdmv_ig_pid = 0;
+                bd->hdmv_ig_read = 0;
+                _run_gc(bd, GC_CTRL_IG_RESET, 0);
+                _close_preload(&bd->st_ig);
+                _init_ig_stream(bd);
+                _hdmv_graphics_init(bd, 1);
+            }
+            if (bd->hdmv_hold_end) {
+                bd->hdmv_end_pending = 0;
+                bd->end_of_playlist = 0;
+            }
+        }
 
         /* Update PSR_TIME */
         media_time = _update_time_psr_from_stream(bd);
@@ -2325,6 +2565,87 @@ static int64_t _clip_seek_time(BLURAY *bd, uint32_t tick)
     return bd->s_pos;
 }
 
+static int _hold_hdmv_graphics(const BLURAY *bd)
+{
+    return bd->hdmv_hold_graphics && bd->title_type == title_hdmv;
+}
+
+static void _hdmv_graphics_init(BLURAY *bd, int preloaded)
+{
+    unsigned source = 0;
+    int64_t pts = gc_ig_pts(bd->graphics_controller, &source);
+    if (!_hold_hdmv_graphics(bd) || !bd->st0.clip || !bd->bdj_pt_has_video || pts < 0 ||
+        (!preloaded && source >= bd->title->clip_list.count)) {
+        _run_gc(bd, GC_CTRL_INIT_MENU, 0);
+        return;
+    }
+
+    const NAV_CLIP *clip = preloaded ? bd->st0.clip : &bd->title->clip_list.clip[source];
+    uint64_t delta = ((uint64_t)pts - 2 * (uint64_t)clip->in_time) &
+                     ((UINT64_C(1) << 33) - 1);
+    uint64_t duration = 2 * (uint64_t)(clip->out_time - clip->in_time);
+    if (preloaded || delta >= (UINT64_C(1) << 32))
+        delta = 0;
+    else if (delta > duration)
+        delta = duration;
+    bd->hdmv_ig_due = 2 * (uint64_t)clip->title_time + delta;
+    bd->hdmv_ig_queue[0].command = GC_CTRL_INIT_MENU;
+    bd->hdmv_ig_queue[0].param = 0;
+    bd->hdmv_ig_count = 1;
+}
+
+static int _hdmv_release_graphics(BLURAY *bd, int64_t time)
+{
+    int nav = 0;
+    while (bd->hdmv_ig_count && bd->hdmv_ig_due <= time) {
+        if (bd->hdmv_ig_kept) {
+            _run_gc(bd, GC_CTRL_IG_CLOSE, 0);
+            bd->hdmv_ig_kept = 0;
+        }
+        for (unsigned i = 0; i < bd->hdmv_ig_count; i++)
+            _run_gc_with_nav(bd, bd->hdmv_ig_queue[i].command, bd->hdmv_ig_queue[i].param, &nav);
+        bd->hdmv_ig_count = 0;
+
+        if (bd->hdmv_ig_pid &&
+            gc_decode_ts(bd->graphics_controller, bd->hdmv_ig_pid, NULL, 0, -1) > 0)
+            _hdmv_graphics_init(bd, 0);
+    }
+    if (bd->hdmv_ig_kept && !bd->hdmv_ig_count) {
+        _run_gc(bd, GC_CTRL_IG_CLOSE, 0);
+        bd->hdmv_ig_kept = 0;
+    }
+    return nav;
+}
+
+static void _hdmv_run_graphics(BLURAY *bd, gc_ctrl_e command, uint32_t param)
+{
+    if (bd->hdmv_ig_count == sizeof(bd->hdmv_ig_queue) / sizeof(bd->hdmv_ig_queue[0]))
+        _hdmv_release_graphics(bd, INT64_MAX);
+
+    if (bd->hdmv_ig_count) {
+        unsigned slot = bd->hdmv_ig_count++;
+        bd->hdmv_ig_queue[slot].command = command;
+        bd->hdmv_ig_queue[slot].param = param;
+    } else {
+        _run_gc(bd, command, param);
+    }
+}
+
+static void _end_of_title(BLURAY *bd)
+{
+    if (bd->title_type == title_hdmv && bd->hdmv_hold_end) {
+        if (!(bd->end_of_playlist & 1)) {
+            if (!_queue_event(bd, BD_EVENT_END_OF_TITLE, 1)) {
+                return;
+            }
+            bd->hdmv_end_pending = 1;
+        }
+    } else {
+        _queue_event(bd, BD_EVENT_END_OF_TITLE, 0);
+    }
+    bd->end_of_playlist |= 1;
+}
+
 static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
 {
     BD_STREAM *st = &bd->st0;
@@ -2374,6 +2695,10 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
                         return out_len;
                     }
 
+                    // A still can have no further picture to release its buttons.
+                    if (_hold_hdmv_graphics(bd) && st->clip->still_mode)
+                        _hdmv_release_graphics(bd, INT64_MAX);
+
                     // handle still mode clips
                     if (st->clip->still_mode == BLURAY_STILL_INFINITE) {
                         _queue_event(bd, BD_EVENT_STILL_TIME, 0);
@@ -2390,8 +2715,7 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
                     st->clip = nav_next_clip(bd->title, st->clip);
                     if (st->clip == NULL) {
                         BD_DEBUG(DBG_BLURAY | DBG_STREAM, "End of title\n");
-                        _queue_event(bd, BD_EVENT_END_OF_TITLE, 0);
-                        bd->end_of_playlist |= 1;
+                        _end_of_title(bd);
                         return 0;
                     }
                     if (!_open_m2ts(bd, st)) {
@@ -2410,12 +2734,25 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
 
                 }
 
+                if (st->lead_check) {
+                    st->lead_check = 0;
+                    if (_dv_lead(bd, st) < 0)
+                        return -1;
+                }
+
                 int r = _read_block(bd, st, bd->int_buf);
                 if (r > 0) {
 
                     if (st->ig_pid > 0) {
-                        if (gc_decode_ts(bd->graphics_controller, st->ig_pid, bd->int_buf, 1, -1) > 0) {
-                            /* initialize menus */
+                        if (_hold_hdmv_graphics(bd)) {
+                            bd->hdmv_ig_pid = st->ig_pid;
+                            gc_queue_ts(bd->graphics_controller, st->ig_pid, bd->int_buf, 1,
+                                        st->clip->ref);
+                            if (!bd->hdmv_ig_count &&
+                                gc_decode_ts(bd->graphics_controller, st->ig_pid, NULL, 0, -1) > 0)
+                                _hdmv_graphics_init(bd, 0);
+                        } else if (gc_decode_ts(bd->graphics_controller, st->ig_pid,
+                                                bd->int_buf, 1, -1) > 0) {
                             _run_gc(bd, GC_CTRL_INIT_MENU, 0);
                         }
                     }
@@ -2456,11 +2793,11 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
                 size = 6144 - st->int_buf_off;
             }
 
-            /* cut read at clip end packet */
-            uint32_t new_clip_pkt = SPN(st->clip_pos + size);
-            if (new_clip_pkt > st->clip->end_pkt) {
-                BD_DEBUG(DBG_STREAM, "cut %d bytes at end of block\n", (new_clip_pkt - st->clip->end_pkt) * 192);
-                size -= (new_clip_pkt - st->clip->end_pkt) * 192;
+            /* A caller can request a partial source packet. Keep the next
+             * PLAYITEM at the exact byte boundary even for unaligned reads. */
+            uint64_t clip_remaining = (uint64_t)st->clip->end_pkt * 192 - st->clip_pos;
+            if (size > clip_remaining) {
+                size = (unsigned int)clip_remaining;
             }
 
             /* copy chunk */
@@ -2490,8 +2827,7 @@ static int _bd_read_locked(BLURAY *bd, unsigned char *buf, int len, int nav_boun
     if (st->clip == NULL) {
         // We previously reached the last clip.  Nothing
         // else to read.
-        _queue_event(bd, BD_EVENT_END_OF_TITLE, 0);
-        bd->end_of_playlist |= 1;
+        _end_of_title(bd);
         return 0;
     }
 
@@ -2729,17 +3065,17 @@ static int _init_ig_stream(BLURAY *bd)
  * select title / angle
  */
 
-static void _close_playlist(BLURAY *bd)
+static void _close_playlist_internal(BLURAY *bd, int keep_graphics)
 {
+    bd->bdj_pt_has_video = 0;
+    bd->hdmv_end_pending = 0;
     /* the program left this playlist: whatever it has not been shown yet it
      * will not be shown, so hand it over now (the behaviour without
      * presentation timing) and forget the presented position */
     _bdj_pt_release(bd, 0, 1);
     _bdj_pt_reset(bd);
 
-    if (bd->graphics_controller) {
-        gc_run(bd->graphics_controller, GC_CTRL_RESET, 0, NULL);
-    }
+    _reset_hdmv_graphics(bd, keep_graphics);
 
     /* stopping playback in middle of playlist ? */
     if (bd->title && bd->st0.clip) {
@@ -2770,6 +3106,11 @@ static void _close_playlist(BLURAY *bd)
     memset(&bd->st0.uo_mask, 0, sizeof(BD_UO_MASK));
     memset(&bd->gc_uo_mask,  0, sizeof(BD_UO_MASK));
     _update_uo_mask(bd);
+}
+
+static void _close_playlist(BLURAY *bd)
+{
+    _close_playlist_internal(bd, 0);
 }
 
 static int _add_known_playlist(BD_DISC *p, const char *mpls_id)
@@ -2816,7 +3157,7 @@ static int _open_playlist(BLURAY *bd, unsigned playlist, unsigned angle)
         disc_event(bd->disc, DISC_EVENT_START, bd->disc_info.num_titles);
     }
 
-    _close_playlist(bd);
+    _close_playlist_internal(bd, _hold_hdmv_graphics(bd));
 
     bd->title = nav_title_open(bd->disc, f_name, angle);
     if (bd->title == NULL) {
@@ -4027,9 +4368,19 @@ int bd_play_title(BLURAY *bd, unsigned title)
     return ret;
 }
 
+static int _run_hdmv(BLURAY *bd);
+
 static int _try_menu_call(BLURAY *bd, int64_t pts)
 {
     _set_scr(bd, pts);
+
+    if (_hold_hdmv_graphics(bd) && bd->hdmv_ig_count &&
+        _hdmv_release_graphics(bd, INT64_MAX)) {
+        for (unsigned i = 0; !bd->hdmv_suspended && i < 100; i++) {
+            if (_run_hdmv(bd) < 0)
+                return 0;
+        }
+    }
 
     if (bd->title_type == title_undef) {
         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_menu_call(): bd_play() not called\n");
@@ -4097,9 +4448,9 @@ static void _process_hdmv_vm_event(BLURAY *bd, HDMV_EVENT *hev)
                 bd->hdmv_num_invalid_pl = 0;
             }
 
-            /* initialize menus */
+            /* Initialize preloaded graphics with the first presented picture. */
             _init_ig_stream(bd);
-            _run_gc(bd, GC_CTRL_INIT_MENU, 0);
+            _hdmv_graphics_init(bd, 1);
             break;
 
         case HDMV_EVENT_PLAY_PI:
@@ -4122,26 +4473,29 @@ static void _process_hdmv_vm_event(BLURAY *bd, HDMV_EVENT *hev)
             break;
 
         case HDMV_EVENT_ENABLE_BUTTON:
-            _run_gc(bd, GC_CTRL_ENABLE_BUTTON, hev->param);
+            _hdmv_run_graphics(bd, GC_CTRL_ENABLE_BUTTON, hev->param);
             break;
 
         case HDMV_EVENT_DISABLE_BUTTON:
-            _run_gc(bd, GC_CTRL_DISABLE_BUTTON, hev->param);
+            _hdmv_run_graphics(bd, GC_CTRL_DISABLE_BUTTON, hev->param);
             break;
 
         case HDMV_EVENT_SET_BUTTON_PAGE:
-            _run_gc(bd, GC_CTRL_SET_BUTTON_PAGE, hev->param);
+            _hdmv_run_graphics(bd, GC_CTRL_SET_BUTTON_PAGE, hev->param);
             break;
 
         case HDMV_EVENT_POPUP_OFF:
-            _run_gc(bd, GC_CTRL_POPUP, 0);
+            _hdmv_run_graphics(bd, GC_CTRL_POPUP, 0);
             break;
 
         case HDMV_EVENT_IG_END:
-            _run_gc(bd, GC_CTRL_IG_END, 0);
+            _hdmv_run_graphics(bd, GC_CTRL_IG_END, 0);
             break;
 
         case HDMV_EVENT_END:
+            if (bd->hdmv_hold_end && (bd->end_of_playlist & 1))
+                _queue_event(bd, BD_EVENT_HDMV_PROGRAM_END, 0);
+            break;
         case HDMV_EVENT_NONE:
       //default:
             break;
@@ -4206,7 +4560,7 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
             }
         }
 
-        if (bd->gc_status & GC_STATUS_ANIMATE) {
+        if ((bd->gc_status & GC_STATUS_ANIMATE) && !bd->hdmv_ig_count) {
             _run_gc(bd, GC_CTRL_NOP, 0);
         }
     }
@@ -4236,6 +4590,8 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
     }
 
     int bytes = _bd_read_locked(bd, buf, len, bd->event_queue != NULL);
+    if (bytes > 0 && _hold_hdmv_graphics(bd))
+        bd->hdmv_ig_read = 1;
 
     /* Queue the BD-J end before the player receives EOF and drains its decoders. */
     if (_bdj_pt_active(bd) && bd->end_of_playlist == 1) {
@@ -4246,7 +4602,7 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
     if (bytes == 0) {
 
         // if no next clip (=end of title), resume HDMV VM
-        if (!bd->st0.clip && bd->title_type == title_hdmv) {
+        if (!bd->st0.clip && bd->title_type == title_hdmv && !bd->hdmv_hold_end) {
             hdmv_vm_resume(bd->hdmv_vm);
             bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
             BD_DEBUG(DBG_BLURAY, "bd_read_ext(): reached end of playlist. hdmv_suspended=%d\n", bd->hdmv_suspended);
@@ -4295,6 +4651,59 @@ void bd_set_scr(BLURAY *bd, int64_t pts)
     bd_mutex_unlock(&bd->mutex);
 }
 
+int bd_bdj_waiting_for_playlist(BLURAY *bd)
+{
+    int waiting;
+    bd_mutex_lock(&bd->mutex);
+    waiting = bd->title_type == title_bdj && (!bd->st0.clip || bd->bdj_wait_start);
+    bd_mutex_unlock(&bd->mutex);
+    return waiting;
+}
+
+static void _resume_hdmv_end(BLURAY *bd)
+{
+    if (bd->hdmv_end_pending && bd->title_type == title_hdmv) {
+        bd->hdmv_end_pending = 0;
+        _hdmv_release_graphics(bd, INT64_MAX);
+        if (!hdmv_vm_running(bd->hdmv_vm))
+            hdmv_vm_resume(bd->hdmv_vm);
+        bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
+    }
+}
+
+void bd_hdmv_set_graphics_hold(BLURAY *bd, int enable)
+{
+    bd_mutex_lock(&bd->mutex);
+    if (!enable && _hold_hdmv_graphics(bd))
+        _hdmv_release_graphics(bd, INT64_MAX);
+    bd->hdmv_hold_graphics = !!enable;
+    bd_mutex_unlock(&bd->mutex);
+}
+
+void bd_hdmv_presented(BLURAY *bd, uint32_t epoch, int64_t title_time)
+{
+    bd_mutex_lock(&bd->mutex);
+    if (_hold_hdmv_graphics(bd) && bd->hdmv_ig_read && epoch == bd->bdj_pt_clock_epoch)
+        _hdmv_release_graphics(bd, title_time);
+    bd_mutex_unlock(&bd->mutex);
+}
+
+void bd_hdmv_set_end_hold(BLURAY *bd, int enable)
+{
+    bd_mutex_lock(&bd->mutex);
+    if (!enable)
+        _resume_hdmv_end(bd);
+    bd->hdmv_hold_end = !!enable;
+    bd_mutex_unlock(&bd->mutex);
+}
+
+void bd_hdmv_release_end(BLURAY *bd)
+{
+    bd_mutex_lock(&bd->mutex);
+    _resume_hdmv_end(bd);
+    bd_mutex_unlock(&bd->mutex);
+}
+
 void bd_bdj_set_presentation_timing(BLURAY *bd, int enable)
 {
     bd_mutex_lock(&bd->mutex);
@@ -4337,9 +4746,23 @@ void bd_bdj_set_playback_time(BLURAY *bd, uint64_t time)
     bd->bdj_pt_position = time;
 }
 
+uint32_t bd_bdj_get_clock_epoch(BLURAY *bd)
+{
+    return bd->bdj_pt_clock_epoch;
+}
+
+void bd_bdj_set_playback_time_at_epoch(BLURAY *bd, uint32_t epoch, uint64_t time)
+{
+    bd_mutex_lock(&bd->mutex);
+    if (epoch == bd->bdj_pt_clock_epoch)
+        bd->bdj_pt_position = time;
+    bd_mutex_unlock(&bd->mutex);
+}
+
 int64_t bdpriv_bdj_presented_time(BLURAY *bd, uint32_t playlist)
 {
-    if (!bd || !bd->bdj_pt_enabled || bd_psr_read(bd->regs, PSR_PLAYLIST) != playlist)
+    if (!bd || !bd->bdj_pt_enabled || !bd->bdj_pt_has_video ||
+        bd_psr_read(bd->regs, PSR_PLAYLIST) != playlist)
         return -1;
 
     uint64_t time = bd->bdj_pt_position;
@@ -4430,6 +4853,11 @@ int bd_mouse_select(BLURAY *bd, int64_t pts, uint16_t x, uint16_t y)
     _set_scr(bd, pts);
 
     if (bd->title_type == title_hdmv) {
+        if (_hold_hdmv_graphics(bd) && bd->hdmv_ig_count &&
+            _hdmv_release_graphics(bd, INT64_MAX)) {
+            bd_mutex_unlock(&bd->mutex);
+            return 1;
+        }
         result = _run_gc(bd, GC_CTRL_MOUSE_MOVE, param);
     } else if (bd->title_type == title_bdj) {
         result = _bdj_event(bd, BDJ_EVENT_MOUSE, param);
@@ -4503,6 +4931,11 @@ int bd_user_input(BLURAY *bd, int64_t pts, uint32_t key)
     bd_mutex_lock(&bd->mutex);
 
     _set_scr(bd, pts);
+    if (_hold_hdmv_graphics(bd) && bd->hdmv_ig_count &&
+        _hdmv_release_graphics(bd, INT64_MAX)) {
+        bd_mutex_unlock(&bd->mutex);
+        return 1;
+    }
     if (_get_key_uo_index(bd, BD_VK_KEY(key), &uo_mask_idx)) {
         uo_is_masked = _is_uo_masked(bd, uo_mask_idx);
     }

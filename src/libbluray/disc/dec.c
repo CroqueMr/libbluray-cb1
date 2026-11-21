@@ -50,18 +50,11 @@ typedef struct {
     BD_BDPLUS_ST *bdplus;
 } DEC_STREAM;
 
-static int64_t _stream_read(BD_FILE_H *fp, uint8_t *buf, int64_t size)
+static int64_t _stream_read_unit(DEC_STREAM *st, uint8_t *buf)
 {
-    DEC_STREAM *st = (DEC_STREAM *)fp->internal;
-    int64_t     result;
-
-    if (size != 6144) {
-        BD_DEBUG(DBG_CRIT, "read size != unit size\n");
-        return 0;
-    }
-
-    result = st->fp->read(st->fp, buf, size);
-    if (result <= 0) {
+    const int64_t size = 6144;
+    int64_t result = st->fp->read(st->fp, buf, size);
+    if (result != size) {
         return result;
     }
 
@@ -78,6 +71,23 @@ static int64_t _stream_read(BD_FILE_H *fp, uint8_t *buf, int64_t size)
     }
 
     return result;
+}
+
+static int64_t _stream_read(BD_FILE_H *fp, uint8_t *buf, int64_t size)
+{
+    DEC_STREAM *st = (DEC_STREAM *)fp->internal;
+    const int64_t unit = 6144;
+    if (size < unit || size % unit) {
+        BD_DEBUG(DBG_CRIT, "read size is not aligned to a source unit\n");
+        return 0;
+    }
+
+    for (int64_t offset = 0; offset < size; offset += unit) {
+        int64_t read = _stream_read_unit(st, buf + offset);
+        if (read != unit)
+            return read < 0 && !offset ? read : offset + (read > 0 ? read : 0);
+    }
+    return size;
 }
 
 static int64_t _stream_seek(BD_FILE_H *fp, int64_t offset, int32_t origin)

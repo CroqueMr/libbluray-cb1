@@ -87,6 +87,8 @@ struct bd_argb_buffer_s;
 BD_PRIVATE struct bd_argb_buffer_s *bdpriv_lock_osd_buffer(struct bluray *bd);
 BD_PRIVATE void                     bdpriv_unlock_osd_buffer(struct bluray *bd);
 
+BD_PRIVATE void bdpriv_bdj_report_graphics(struct bluray *bd, const unsigned *img, int w, int h,
+                                           int x0, int y0, int x1, int y1);
 BD_PRIVATE void  bdpriv_bdj_osd_cb(struct bluray *bd, const unsigned *img, int w, int h,
                                    int x0, int y0, int x1, int y1);
 
