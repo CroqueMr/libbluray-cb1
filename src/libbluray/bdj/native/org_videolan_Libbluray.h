@@ -198,6 +198,14 @@ JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_tellTimeN
 
 /*
  * Class:     org_videolan_Libbluray
+ * Method:    getPresentedTimeN
+ * Signature: (JI)J
+ */
+JNIEXPORT jlong JNICALL Java_org_videolan_Libbluray_getPresentedTimeN
+  (JNIEnv *, jclass, jlong, jint);
+
+/*
+ * Class:     org_videolan_Libbluray
  * Method:    selectRateN
  * Signature: (JFI)I
  */
