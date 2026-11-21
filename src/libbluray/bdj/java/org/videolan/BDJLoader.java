@@ -269,6 +269,7 @@ public class BDJLoader {
 
             // change psr
             Libbluray.writePSR(RegisterAccess.PSR_TITLE_NR, title.getTitleNum());
+            gui.syncAll();
 
             // notify AppsDatabase
             ((BDJAppsDatabase)BDJAppsDatabase.getAppsDatabase()).newDatabase(bdjo, proxys);
