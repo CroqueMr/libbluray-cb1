@@ -1131,7 +1131,7 @@ static int _pes_times(const uint8_t *p, int64_t *pts, int64_t *dts)
     return 1;
 }
 
-static void _dv_lead(BLURAY *bd, BD_STREAM *st)
+static int _dv_lead(BLURAY *bd, BD_STREAM *st)
 {
     uint32_t ep = SPN(st->clip_pos);
     uint8_t *unit;
@@ -1141,11 +1141,11 @@ static void _dv_lead(BLURAY *bd, BD_STREAM *st)
     int have = 0;
 
     if (!st->lead_pid || ep == 0 || !st->fp) {
-        return;
+        return 0;
     }
     unit = malloc(LEAD_READ_PACKETS * 192);
     if (!unit) {
-        return;
+        return 0;
     }
 
     /* the base layer's random-access picture at the entry point */
@@ -1209,10 +1209,13 @@ static void _dv_lead(BLURAY *bd, BD_STREAM *st)
     }
 
 done:
-    if (file_seek(st->fp, st->clip_block_pos, SEEK_SET) < 0) {
-        BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Unable to seek clip %s!\n", st->clip->name);
-    }
     X_FREE(unit);
+    if (file_seek(st->fp, st->clip_block_pos, SEEK_SET) < 0) {
+        BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Unable to restore seek position in clip %s!\n",
+                 st->clip->name);
+        return -1;
+    }
+    return 0;
 }
 
 /*
@@ -2733,7 +2736,8 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
 
                 if (st->lead_check) {
                     st->lead_check = 0;
-                    _dv_lead(bd, st);
+                    if (_dv_lead(bd, st) < 0)
+                        return -1;
                 }
 
                 int r = _read_block(bd, st, bd->int_buf);
