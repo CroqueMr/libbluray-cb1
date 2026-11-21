@@ -55,6 +55,7 @@ typedef struct {
     BD_PG_COMPOSITION   *pcs;
     BD_TEXTST_DIALOG_STYLE *style;
 
+    unsigned ics_src;
     uint8_t decoding; /* internal flag: PCS/ICS decoded, but no end of presentation seen yet */
 
 } PG_DISPLAY_SET;
@@ -67,6 +68,9 @@ BD_PRIVATE void pg_display_set_free(PG_DISPLAY_SET **s);
 
 BD_PRIVATE GRAPHICS_PROCESSOR *graphics_processor_init(void);
 BD_PRIVATE void                graphics_processor_free(GRAPHICS_PROCESSOR **p);
+BD_PRIVATE int                 graphics_processor_queue_ts(GRAPHICS_PROCESSOR *p,
+                                                           uint16_t pid, uint8_t *unit,
+                                                           unsigned num_units, unsigned src);
 
 /**
  *

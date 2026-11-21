@@ -409,6 +409,7 @@ static int _decode_ics(PG_DISPLAY_SET *s, BITBUFFER *bb, PES_BUFFER *p)
     }
 
     s->ics->pts  = p->pts;
+    s->ics_src   = p->src;
     s->valid_pts = p->pts;
 
     _check_epoch_start(s);
@@ -620,13 +621,10 @@ void graphics_processor_free(GRAPHICS_PROCESSOR **p)
     }
 }
 
-int graphics_processor_decode_ts(GRAPHICS_PROCESSOR *p,
-                                 PG_DISPLAY_SET **s,
-                                 uint16_t pid, uint8_t *unit, unsigned num_units,
-                                 int64_t stc)
+int graphics_processor_queue_ts(GRAPHICS_PROCESSOR *p, uint16_t pid, uint8_t *unit,
+                                unsigned num_units, unsigned src)
 {
     unsigned ii;
-    int result = 0;
 
     if (pid != p->pid) {
         m2ts_demux_free(&p->demux);
@@ -641,13 +639,19 @@ int graphics_processor_decode_ts(GRAPHICS_PROCESSOR *p,
     }
 
     for (ii = 0; ii < num_units; ii++) {
-        pes_buffer_append(&p->queue, m2ts_demux(p->demux, unit));
+        pes_buffer_append(&p->queue, m2ts_demux(p->demux, unit, src));
         unit += 6144;
     }
 
-    if (p->queue) {
-        result = graphics_processor_decode_pes(s, &p->queue, stc);
-    }
+    return 1;
+}
 
-    return result;
+int graphics_processor_decode_ts(GRAPHICS_PROCESSOR *p,
+                                 PG_DISPLAY_SET **s,
+                                 uint16_t pid, uint8_t *unit, unsigned num_units,
+                                 int64_t stc)
+{
+    if (graphics_processor_queue_ts(p, pid, unit, num_units, 0) && p->queue)
+        return graphics_processor_decode_pes(s, &p->queue, stc);
+    return 0;
 }
