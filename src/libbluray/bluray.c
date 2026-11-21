@@ -91,6 +91,13 @@ typedef struct {
     uint8_t         encrypted_block_cnt;
     uint8_t         seek_flag;  /* used to fine-tune first read after seek */
 
+    /* the Dolby Vision enhancement layer before the entry point the clip is read from (_dv_lead()) */
+    uint8_t         lead_check;   /* look for it before the next read */
+    uint16_t        lead_base_pid;
+    uint16_t        lead_pid;     /* the enhancement layer's PID in the clip, 0 if it has none */
+    uint32_t        lead_end_spn; /* the packets before this one are of the lead: of them only the
+                                     enhancement layer (and PAT, PMT, PCR) is given */
+
     M2TS_FILTER    *m2ts_filter;
 } BD_STREAM;
 
@@ -744,6 +751,10 @@ static int _open_m2ts(BLURAY *bd, BD_STREAM *st)
     st->clip_block_pos = (st->clip_pos / 6144) * 6144;
     st->eof_hit = 0;
     st->encrypted_block_cnt = 0;
+    st->lead_end_spn = 0;
+    st->lead_pid = 0;
+    st->lead_base_pid = 0;
+    st->lead_check = 0;
 
     if (st->fp) {
         int64_t clip_size = file_size(st->fp);
@@ -766,6 +777,16 @@ static int _open_m2ts(BLURAY *bd, BD_STREAM *st)
                 st->uo_mask = uo_mask_combine(pl->app_info.uo_mask,
                                               pl->play_item[st->clip->ref].uo_mask);
                 _update_uo_mask(bd);
+
+                /* the Dolby Vision enhancement layer in the clip's own transport stream */
+                if (bd->dv_video_preroll && stn->num_video == 1 && stn->video &&
+                    stn->video[0].coding_type == 0x24 && stn->num_dv == 1 && stn->dv &&
+                    stn->dv[0].coding_type == 0x24 && stn->dv[0].stream_type == 1) {
+                    st->lead_base_pid = stn->video[0].pid;
+                    st->lead_pid = stn->dv[0].pid;
+                    st->lead_check = st->clip->start_pkt != 0 &&
+                                     st->clip->connection != CONNECT_SEAMLESS;
+                }
 
                 st->m2ts_filter = m2ts_filter_init((int64_t)st->clip->in_time << 1,
                                                    (int64_t)st->clip->out_time << 1,
@@ -875,6 +896,26 @@ static int _read_block(BLURAY *bd, BD_STREAM *st, uint8_t *buf)
                     BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Skipping broken unit at %" PRId64 "\n", st->clip_block_pos - len);
                     st->clip_pos += len;
                     return error;
+                }
+
+                /* the lead before an entry point: only the enhancement layer of Dolby Vision passes
+                   (and PAT, PMT, PCR); the filter sees the rest wiped */
+                if (BD_UNLIKELY(st->lead_end_spn)) {
+                    uint32_t spn = SPN(st->clip_block_pos - len);
+                    unsigned ii;
+                    for (ii = 0; ii < len / 192; ii++, spn++) {
+                        uint8_t *p = buf + ii * 192;
+                        uint16_t pid;
+                        if (spn >= st->lead_end_spn) {
+                            st->lead_end_spn = 0;
+                            break;
+                        }
+                        pid = TS_PID(p);
+                        if (pid >= HDMV_PID_VIDEO && pid != st->lead_pid) {
+                            p[4 + 2] = 0xff;
+                            p[4 + 1] |= 0x1f;
+                        }
+                    }
                 }
 
                 if (st->m2ts_filter) {
@@ -1028,8 +1069,153 @@ static int64_t _seek_stream(BLURAY *bd, BD_STREAM *st,
 
     st->int_buf_off = 6144;
     st->seek_flag = 1;
+    /* a seek lands on an entry point */
+    st->lead_end_spn = 0;
+    st->lead_check = st->lead_pid != 0;
 
     return st->clip_pos;
+}
+
+/*
+ * The Dolby Vision enhancement layer before an entry point.
+ *
+ * An entry point of the EP map is the first packet of a random-access picture of the base layer
+ * (the clip's first video stream). The enhancement layer (PID 0x1015 on a disc) has an access unit
+ * of the same picture, and a multiplexer may put it before the base layer's: a reading that starts
+ * at the entry point (a seek, a chapter, a mark, a play item that is not joined seamlessly) then
+ * gets the enhancement layer only from its next random-access picture, and a player that adds the
+ * layer gives the pictures until then without it.
+ *
+ * Before the first read from an entry point of a clip with an enhancement layer, the packets before
+ * it are looked through backwards for the enhancement layer's access unit that is decoded with the
+ * base layer's picture: the one with its DTS (a disc gives the two access units of a picture the
+ * same times, and a player joins the layers by the decoding time; the layers of a stream whose
+ * pictures are presented in different orders have the same DTS, not the same PTS). The look ends at
+ * the first access unit of the enhancement layer decoded before the base layer's picture (a PID's
+ * packets are in decoding order: the one decoded with the picture comes after it, it was not before
+ * the entry point), and in any case once the packets' arrival times are LEAD_MAX_ATS before the
+ * entry point's. The T-STD of ISO/IEC 13818-1 keeps no data in its buffers for more than
+ * one second (2.4.2.6), and the base layer's picture arrives at the latest at its decoding time, the
+ * enhancement layer's at the earliest one second before the same decoding time: they arrive at most
+ * one second apart. Where the access unit is found, the reading starts there, and of the packets
+ * before the entry point only the enhancement layer (and PAT, PMT, PCR) is given: the base layer,
+ * audio and graphics start at the entry point as before. The title position goes back by as much, so
+ * that it is still the entry point's once the lead is read.
+ */
+
+#define LEAD_READ_PACKETS (32u * 32)
+#define LEAD_MAX_ATS     (27000000u * 3 / 2)  /* 1.5 s at 27 MHz: one second (T-STD), and half of it */
+#define LEAD_MAX_PACKETS (24u * 1024 * 1024 / 192)  /* and never more than 24 MiB (1.5 s at 128 Mbit/s) */
+
+static int _pes_times(const uint8_t *p, int64_t *pts, int64_t *dts)
+{
+    /* p: a source packet that starts a PES packet */
+    const uint8_t *ts = p + 4;
+    unsigned off = 4;
+    if (ts[3] & 0x20) {
+        off += 1 + ts[4];
+    }
+    if (!(ts[3] & 0x10) || off + 14 > 188) {
+        return 0;
+    }
+    const uint8_t *pes = ts + off;
+    if (pes[0] || pes[1] || pes[2] != 1 || !(pes[7] & 0x80) || pes[8] < 5 ||
+        ((pes[7] & 0x40) && (pes[8] < 10 || off + 19 > 188))) {
+        return 0;
+    }
+#define _PES_TS(b) ((((int64_t)(b)[0] & 0x0e) << 29) | ((b)[1] << 22) | (((b)[2] & 0xfe) << 14) | \
+                    ((b)[3] << 7) | (((b)[4] & 0xfe) >> 1))
+    *pts = _PES_TS(pes + 9);
+    *dts = (pes[7] & 0x40) && off + 19 <= 188 ? _PES_TS(pes + 14) : *pts;
+#undef _PES_TS
+    return 1;
+}
+
+static int _dv_lead(BLURAY *bd, BD_STREAM *st)
+{
+    uint32_t ep = SPN(st->clip_pos);
+    uint8_t *unit;
+    int64_t unit_spn = -1;
+    int64_t base_pts, base_dts, pts, dts, delta;
+    uint32_t ep_ats, spn, found = 0, scanned = 0;
+    int have = 0;
+
+    if (!st->lead_pid || ep == 0 || !st->fp) {
+        return 0;
+    }
+    unit = malloc(LEAD_READ_PACKETS * 192);
+    if (!unit) {
+        return 0;
+    }
+
+    /* the base layer's random-access picture at the entry point */
+    unit_spn = (ep / 32) * 32;
+    if (file_seek(st->fp, (int64_t)unit_spn * 192, SEEK_SET) < 0 || file_read(st->fp, unit, 6144) != 6144) {
+        goto done;
+    }
+    {
+        const uint8_t *p = unit + (ep % 32) * 192;
+        if (p[4] != 0x47 || TS_PID(p) != st->lead_base_pid || !(p[4 + 1] & 0x40) ||
+            !_pes_times(p, &base_pts, &base_dts)) {
+            goto done;
+        }
+        ep_ats = ((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]) & 0x3fffffff;
+    }
+
+    for (spn = ep; spn > 0 && scanned < LEAD_MAX_PACKETS; scanned++) {
+        const uint8_t *p;
+        uint32_t ats;
+        spn--;
+        if (spn < unit_spn) {
+            unsigned packets = unit_spn < LEAD_READ_PACKETS ? (unsigned)unit_spn : LEAD_READ_PACKETS;
+            int64_t bytes = (int64_t)packets * 192;
+            unit_spn -= packets;
+            if (file_seek(st->fp, unit_spn * 192, SEEK_SET) < 0 ||
+                file_read(st->fp, unit, bytes) != bytes) {
+                break;
+            }
+        }
+        p = unit + (spn - unit_spn) * 192;
+        if (p[4] != 0x47) {
+            break;
+        }
+        ats = ((uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]) & 0x3fffffff;
+        if (((ep_ats - ats) & 0x3fffffff) > LEAD_MAX_ATS) {
+            break;
+        }
+        if (TS_PID(p) != st->lead_pid || !(p[4 + 1] & 0x40) || !_pes_times(p, &pts, &dts)) {
+            continue;
+        }
+        /* the layer's access unit decoded with the picture, or one decoded before it (on the
+           33-bit clock): then the picture's own is not before the entry point */
+        delta = (dts - base_dts) & ((INT64_C(1) << 33) - 1);
+        if (delta == 0) {
+            found = spn;
+            have = 1;
+            break;
+        }
+        if (delta >= (INT64_C(1) << 32)) {
+            break;
+        }
+    }
+
+    if (have && (uint64_t)(ep - found) * 192 <= bd->s_pos) {
+        BD_DEBUG(DBG_BLURAY, "clip %s: the enhancement layer's picture of the entry point %u starts %u packets before it\n",
+                 st->clip->name, ep, ep - found);
+        st->clip_pos = (uint64_t)found * 192;
+        st->clip_block_pos = (st->clip_pos / 6144) * 6144;
+        bd->s_pos -= (uint64_t)(ep - found) * 192;
+        st->lead_end_spn = ep;
+    }
+
+done:
+    X_FREE(unit);
+    if (file_seek(st->fp, st->clip_block_pos, SEEK_SET) < 0) {
+        BD_DEBUG(DBG_BLURAY | DBG_CRIT, "Unable to restore seek position in clip %s!\n",
+                 st->clip->name);
+        return -1;
+    }
+    return 0;
 }
 
 /*
@@ -2546,6 +2732,12 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
                         return 0;
                     }
 
+                }
+
+                if (st->lead_check) {
+                    st->lead_check = 0;
+                    if (_dv_lead(bd, st) < 0)
+                        return -1;
                 }
 
                 int r = _read_block(bd, st, bd->int_buf);
@@ -4176,13 +4368,19 @@ int bd_play_title(BLURAY *bd, unsigned title)
     return ret;
 }
 
+static int _run_hdmv(BLURAY *bd);
+
 static int _try_menu_call(BLURAY *bd, int64_t pts)
 {
     _set_scr(bd, pts);
 
     if (_hold_hdmv_graphics(bd) && bd->hdmv_ig_count &&
-        _hdmv_release_graphics(bd, INT64_MAX))
-        return 1;
+        _hdmv_release_graphics(bd, INT64_MAX)) {
+        for (unsigned i = 0; !bd->hdmv_suspended && i < 100; i++) {
+            if (_run_hdmv(bd) < 0)
+                return 0;
+        }
+    }
 
     if (bd->title_type == title_undef) {
         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_menu_call(): bd_play() not called\n");
