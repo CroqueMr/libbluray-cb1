@@ -1151,6 +1151,11 @@ BD_PUBLIC void bd_set_scr(BLURAY *bd, int64_t pts);
 /** Whether the current BD-J title has no readable playlist yet. */
 BD_PUBLIC int bd_bdj_waiting_for_playlist(BLURAY *bd);
 
+#define BD_HDMV_GRAPHICS_HOLD 1
+/* Deliver HDMV interactive graphics once the 90 kHz title time is presented. */
+BD_PUBLIC void bd_hdmv_set_graphics_hold(BLURAY *bd, int enable);
+BD_PUBLIC void bd_hdmv_presented(BLURAY *bd, uint32_t epoch, int64_t title_time);
+
 #define BD_HDMV_END_HOLD 1
 
 /**
