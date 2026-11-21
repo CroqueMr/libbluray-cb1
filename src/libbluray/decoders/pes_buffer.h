@@ -34,6 +34,8 @@ struct pes_buffer_s {
     int64_t   pts;
     int64_t   dts;
 
+    unsigned  src;  // source of the data (caller defined)
+
     struct pes_buffer_s *next;
 };
 
