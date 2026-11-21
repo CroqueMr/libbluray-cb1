@@ -212,7 +212,7 @@ static int _parse_pes(PES_BUFFER *p, uint8_t *buf, unsigned len)
  *
  */
 
-PES_BUFFER *m2ts_demux(M2TS_DEMUX *p, uint8_t *buf)
+PES_BUFFER *m2ts_demux(M2TS_DEMUX *p, uint8_t *buf, unsigned src)
 {
     uint8_t   *end = buf + 6144;
     PES_BUFFER *result = NULL;
@@ -266,6 +266,7 @@ PES_BUFFER *m2ts_demux(M2TS_DEMUX *p, uint8_t *buf)
                 continue;
             }
             p->pes_length = r;
+            p->buf->src = src;
 
         } else {
 

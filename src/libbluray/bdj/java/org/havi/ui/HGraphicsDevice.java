@@ -58,30 +58,26 @@ public class HGraphicsDevice extends HScreenDevice {
     }
 
     public HGraphicsConfiguration getBestConfiguration(HGraphicsConfigTemplate hgct) {
-        int score = -1;
-        HGraphicsConfiguration hgc = null;
-        for (int i = 0; i < hgcArray.length; i++) {
-            int s = hgct.match(hgcArray[i]);
-            if (s > score) {
-                score = s;
-                hgc = hgcArray[i];
-            }
-        }
-        return hgc;
+        return getBestConfiguration(new HGraphicsConfigTemplate[] { hgct });
     }
 
     public HGraphicsConfiguration getBestConfiguration(HGraphicsConfigTemplate hgcta[]) {
         int score = -1;
-        HGraphicsConfiguration hgc = null;
-        for (int i = 0; i < hgcArray.length; i++)
+        HGraphicsConfiguration best = null;
+        Dimension currentSize = GUIManager.currentSize();
+        for (int i = 0; i < hgcArray.length; i++) {
+            HGraphicsConfiguration config = hgcArray[i];
             for (int j = 0; j < hgcta.length; j++) {
-                int s = hgcta[j].match(hgcArray[i]);
-                if (s > score) {
-                    score = s;
-                    hgc = hgcArray[i];
+                int candidate = hgcta[j].match(config);
+                if (candidate > score ||
+                        (candidate >= 0 && candidate == score && currentSize != null &&
+                         currentSize.equals(config.getPixelResolution()))) {
+                    score = candidate;
+                    best = config;
                 }
             }
-        return hgc;
+        }
+        return best;
     }
 
     public HGraphicsConfiguration getCurrentConfiguration() {
