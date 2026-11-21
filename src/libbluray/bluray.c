@@ -1103,6 +1103,7 @@ static int64_t _seek_stream(BLURAY *bd, BD_STREAM *st,
  * that it is still the entry point's once the lead is read.
  */
 
+#define LEAD_READ_PACKETS (32u * 32)
 #define LEAD_MAX_ATS     (27000000u * 3 / 2)  /* 1.5 s at 27 MHz: one second (T-STD), and half of it */
 #define LEAD_MAX_PACKETS (24u * 1024 * 1024 / 192)  /* and never more than 24 MiB (1.5 s at 128 Mbit/s) */
 
@@ -1142,7 +1143,7 @@ static void _dv_lead(BLURAY *bd, BD_STREAM *st)
     if (!st->lead_pid || ep == 0 || !st->fp) {
         return;
     }
-    unit = malloc(6144);
+    unit = malloc(LEAD_READ_PACKETS * 192);
     if (!unit) {
         return;
     }
@@ -1165,14 +1166,16 @@ static void _dv_lead(BLURAY *bd, BD_STREAM *st)
         const uint8_t *p;
         uint32_t ats;
         spn--;
-        if ((int64_t)(spn / 32) * 32 != unit_spn) {
-            unit_spn = (spn / 32) * 32;
-            if (file_seek(st->fp, (int64_t)unit_spn * 192, SEEK_SET) < 0 ||
-                file_read(st->fp, unit, 6144) != 6144) {
+        if (spn < unit_spn) {
+            unsigned packets = unit_spn < LEAD_READ_PACKETS ? (unsigned)unit_spn : LEAD_READ_PACKETS;
+            int64_t bytes = (int64_t)packets * 192;
+            unit_spn -= packets;
+            if (file_seek(st->fp, unit_spn * 192, SEEK_SET) < 0 ||
+                file_read(st->fp, unit, bytes) != bytes) {
                 break;
             }
         }
-        p = unit + (spn % 32) * 192;
+        p = unit + (spn - unit_spn) * 192;
         if (p[4] != 0x47) {
             break;
         }
@@ -4361,13 +4364,19 @@ int bd_play_title(BLURAY *bd, unsigned title)
     return ret;
 }
 
+static int _run_hdmv(BLURAY *bd);
+
 static int _try_menu_call(BLURAY *bd, int64_t pts)
 {
     _set_scr(bd, pts);
 
     if (_hold_hdmv_graphics(bd) && bd->hdmv_ig_count &&
-        _hdmv_release_graphics(bd, INT64_MAX))
-        return 1;
+        _hdmv_release_graphics(bd, INT64_MAX)) {
+        for (unsigned i = 0; !bd->hdmv_suspended && i < 100; i++) {
+            if (_run_hdmv(bd) < 0)
+                return 0;
+        }
+    }
 
     if (bd->title_type == title_undef) {
         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_menu_call(): bd_play() not called\n");
