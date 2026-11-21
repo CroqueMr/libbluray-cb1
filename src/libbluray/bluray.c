@@ -191,6 +191,16 @@ struct bluray {
 
     /* First visible BD-J graphics of the title started by the loader. */
     uint8_t         hdmv_hold_end;
+    uint8_t         hdmv_hold_graphics;
+    uint8_t         hdmv_ig_kept;
+    uint8_t         hdmv_ig_read;
+    unsigned        hdmv_ig_count;
+    uint16_t        hdmv_ig_pid;
+    int64_t         hdmv_ig_due;
+    struct {
+        gc_ctrl_e command;
+        uint32_t param;
+    } hdmv_ig_queue[64];
     uint8_t         hdmv_end_pending;
     BD_MUTEX        gfx_mutex;
     uint8_t         gfx_pending;
@@ -978,6 +988,19 @@ static int _preload_m2ts(BLURAY *bd, BD_PRELOAD *p)
     return 1;
 }
 
+static void _reset_hdmv_graphics(BLURAY *bd, int keep_plane)
+{
+    bd->hdmv_ig_count = 0;
+    bd->hdmv_ig_pid = 0;
+    bd->hdmv_ig_kept = 0;
+    bd->hdmv_ig_read = 0;
+    if (bd->graphics_controller)
+        bd->hdmv_ig_kept = gc_run(bd->graphics_controller, GC_CTRL_RESET, keep_plane, NULL) > 0;
+}
+
+static int _init_ig_stream(BLURAY *bd);
+static void _hdmv_graphics_init(BLURAY *bd, int preloaded);
+
 static int64_t _seek_stream(BLURAY *bd, BD_STREAM *st,
                             const NAV_CLIP *clip, uint32_t clip_pkt)
 {
@@ -1013,7 +1036,7 @@ static int64_t _seek_stream(BLURAY *bd, BD_STREAM *st,
  * Graphics controller interface
  */
 
-static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
+static int _run_gc_with_nav(BLURAY *bd, gc_ctrl_e msg, uint32_t param, int *nav)
 {
     int result = -1;
 
@@ -1027,6 +1050,8 @@ static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
         result = gc_run(bd->graphics_controller, msg, param, &cmds);
 
         if (cmds.num_nav_cmds > 0) {
+            if (nav)
+                *nav = 1;
             hdmv_vm_set_object(bd->hdmv_vm, cmds.num_nav_cmds, cmds.nav_cmds);
             bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
         }
@@ -1060,6 +1085,11 @@ static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
     }
 
     return result;
+}
+
+static int _run_gc(BLURAY *bd, gc_ctrl_e msg, uint32_t param)
+{
+    return _run_gc_with_nav(bd, msg, param, NULL);
 }
 
 /*
@@ -1998,9 +2028,21 @@ static int64_t _seek_internal(BLURAY *bd,
 
         /* update title position */
         bd->s_pos = (uint64_t)title_pkt * 192;
-        if (bd->title_type == title_hdmv && bd->hdmv_hold_end) {
-            bd->hdmv_end_pending = 0;
-            bd->end_of_playlist = 0;
+        if (bd->title_type == title_hdmv) {
+            if (bd->hdmv_hold_graphics) {
+                bd->bdj_pt_clock_epoch++;
+                bd->hdmv_ig_count = 0;
+                bd->hdmv_ig_pid = 0;
+                bd->hdmv_ig_read = 0;
+                _run_gc(bd, GC_CTRL_IG_RESET, 0);
+                _close_preload(&bd->st_ig);
+                _init_ig_stream(bd);
+                _hdmv_graphics_init(bd, 1);
+            }
+            if (bd->hdmv_hold_end) {
+                bd->hdmv_end_pending = 0;
+                bd->end_of_playlist = 0;
+            }
         }
 
         /* Update PSR_TIME */
@@ -2337,6 +2379,72 @@ static int64_t _clip_seek_time(BLURAY *bd, uint32_t tick)
     return bd->s_pos;
 }
 
+static int _hold_hdmv_graphics(const BLURAY *bd)
+{
+    return bd->hdmv_hold_graphics && bd->title_type == title_hdmv;
+}
+
+static void _hdmv_graphics_init(BLURAY *bd, int preloaded)
+{
+    unsigned source = 0;
+    int64_t pts = gc_ig_pts(bd->graphics_controller, &source);
+    if (!_hold_hdmv_graphics(bd) || !bd->st0.clip || !bd->bdj_pt_has_video || pts < 0 ||
+        (!preloaded && source >= bd->title->clip_list.count)) {
+        _run_gc(bd, GC_CTRL_INIT_MENU, 0);
+        return;
+    }
+
+    const NAV_CLIP *clip = preloaded ? bd->st0.clip : &bd->title->clip_list.clip[source];
+    uint64_t delta = ((uint64_t)pts - 2 * (uint64_t)clip->in_time) &
+                     ((UINT64_C(1) << 33) - 1);
+    uint64_t duration = 2 * (uint64_t)(clip->out_time - clip->in_time);
+    if (preloaded || delta >= (UINT64_C(1) << 32))
+        delta = 0;
+    else if (delta > duration)
+        delta = duration;
+    bd->hdmv_ig_due = 2 * (uint64_t)clip->title_time + delta;
+    bd->hdmv_ig_queue[0].command = GC_CTRL_INIT_MENU;
+    bd->hdmv_ig_queue[0].param = 0;
+    bd->hdmv_ig_count = 1;
+}
+
+static int _hdmv_release_graphics(BLURAY *bd, int64_t time)
+{
+    int nav = 0;
+    while (bd->hdmv_ig_count && bd->hdmv_ig_due <= time) {
+        if (bd->hdmv_ig_kept) {
+            _run_gc(bd, GC_CTRL_IG_CLOSE, 0);
+            bd->hdmv_ig_kept = 0;
+        }
+        for (unsigned i = 0; i < bd->hdmv_ig_count; i++)
+            _run_gc_with_nav(bd, bd->hdmv_ig_queue[i].command, bd->hdmv_ig_queue[i].param, &nav);
+        bd->hdmv_ig_count = 0;
+
+        if (bd->hdmv_ig_pid &&
+            gc_decode_ts(bd->graphics_controller, bd->hdmv_ig_pid, NULL, 0, -1) > 0)
+            _hdmv_graphics_init(bd, 0);
+    }
+    if (bd->hdmv_ig_kept && !bd->hdmv_ig_count) {
+        _run_gc(bd, GC_CTRL_IG_CLOSE, 0);
+        bd->hdmv_ig_kept = 0;
+    }
+    return nav;
+}
+
+static void _hdmv_run_graphics(BLURAY *bd, gc_ctrl_e command, uint32_t param)
+{
+    if (bd->hdmv_ig_count == sizeof(bd->hdmv_ig_queue) / sizeof(bd->hdmv_ig_queue[0]))
+        _hdmv_release_graphics(bd, INT64_MAX);
+
+    if (bd->hdmv_ig_count) {
+        unsigned slot = bd->hdmv_ig_count++;
+        bd->hdmv_ig_queue[slot].command = command;
+        bd->hdmv_ig_queue[slot].param = param;
+    } else {
+        _run_gc(bd, command, param);
+    }
+}
+
 static void _end_of_title(BLURAY *bd)
 {
     if (bd->title_type == title_hdmv && bd->hdmv_hold_end) {
@@ -2401,6 +2509,10 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
                         return out_len;
                     }
 
+                    // A still can have no further picture to release its buttons.
+                    if (_hold_hdmv_graphics(bd) && st->clip->still_mode)
+                        _hdmv_release_graphics(bd, INT64_MAX);
+
                     // handle still mode clips
                     if (st->clip->still_mode == BLURAY_STILL_INFINITE) {
                         _queue_event(bd, BD_EVENT_STILL_TIME, 0);
@@ -2440,8 +2552,15 @@ static int _bd_read(BLURAY *bd, unsigned char *buf, int len, int nav_boundary)
                 if (r > 0) {
 
                     if (st->ig_pid > 0) {
-                        if (gc_decode_ts(bd->graphics_controller, st->ig_pid, bd->int_buf, 1, -1) > 0) {
-                            /* initialize menus */
+                        if (_hold_hdmv_graphics(bd)) {
+                            bd->hdmv_ig_pid = st->ig_pid;
+                            gc_queue_ts(bd->graphics_controller, st->ig_pid, bd->int_buf, 1,
+                                        st->clip->ref);
+                            if (!bd->hdmv_ig_count &&
+                                gc_decode_ts(bd->graphics_controller, st->ig_pid, NULL, 0, -1) > 0)
+                                _hdmv_graphics_init(bd, 0);
+                        } else if (gc_decode_ts(bd->graphics_controller, st->ig_pid,
+                                                bd->int_buf, 1, -1) > 0) {
                             _run_gc(bd, GC_CTRL_INIT_MENU, 0);
                         }
                     }
@@ -2754,7 +2873,7 @@ static int _init_ig_stream(BLURAY *bd)
  * select title / angle
  */
 
-static void _close_playlist(BLURAY *bd)
+static void _close_playlist_internal(BLURAY *bd, int keep_graphics)
 {
     bd->bdj_pt_has_video = 0;
     bd->hdmv_end_pending = 0;
@@ -2764,9 +2883,7 @@ static void _close_playlist(BLURAY *bd)
     _bdj_pt_release(bd, 0, 1);
     _bdj_pt_reset(bd);
 
-    if (bd->graphics_controller) {
-        gc_run(bd->graphics_controller, GC_CTRL_RESET, 0, NULL);
-    }
+    _reset_hdmv_graphics(bd, keep_graphics);
 
     /* stopping playback in middle of playlist ? */
     if (bd->title && bd->st0.clip) {
@@ -2797,6 +2914,11 @@ static void _close_playlist(BLURAY *bd)
     memset(&bd->st0.uo_mask, 0, sizeof(BD_UO_MASK));
     memset(&bd->gc_uo_mask,  0, sizeof(BD_UO_MASK));
     _update_uo_mask(bd);
+}
+
+static void _close_playlist(BLURAY *bd)
+{
+    _close_playlist_internal(bd, 0);
 }
 
 static int _add_known_playlist(BD_DISC *p, const char *mpls_id)
@@ -2843,7 +2965,7 @@ static int _open_playlist(BLURAY *bd, unsigned playlist, unsigned angle)
         disc_event(bd->disc, DISC_EVENT_START, bd->disc_info.num_titles);
     }
 
-    _close_playlist(bd);
+    _close_playlist_internal(bd, _hold_hdmv_graphics(bd));
 
     bd->title = nav_title_open(bd->disc, f_name, angle);
     if (bd->title == NULL) {
@@ -4058,6 +4180,10 @@ static int _try_menu_call(BLURAY *bd, int64_t pts)
 {
     _set_scr(bd, pts);
 
+    if (_hold_hdmv_graphics(bd) && bd->hdmv_ig_count &&
+        _hdmv_release_graphics(bd, INT64_MAX))
+        return 1;
+
     if (bd->title_type == title_undef) {
         BD_DEBUG(DBG_BLURAY | DBG_CRIT, "bd_menu_call(): bd_play() not called\n");
         return 0;
@@ -4124,9 +4250,9 @@ static void _process_hdmv_vm_event(BLURAY *bd, HDMV_EVENT *hev)
                 bd->hdmv_num_invalid_pl = 0;
             }
 
-            /* initialize menus */
+            /* Initialize preloaded graphics with the first presented picture. */
             _init_ig_stream(bd);
-            _run_gc(bd, GC_CTRL_INIT_MENU, 0);
+            _hdmv_graphics_init(bd, 1);
             break;
 
         case HDMV_EVENT_PLAY_PI:
@@ -4149,23 +4275,23 @@ static void _process_hdmv_vm_event(BLURAY *bd, HDMV_EVENT *hev)
             break;
 
         case HDMV_EVENT_ENABLE_BUTTON:
-            _run_gc(bd, GC_CTRL_ENABLE_BUTTON, hev->param);
+            _hdmv_run_graphics(bd, GC_CTRL_ENABLE_BUTTON, hev->param);
             break;
 
         case HDMV_EVENT_DISABLE_BUTTON:
-            _run_gc(bd, GC_CTRL_DISABLE_BUTTON, hev->param);
+            _hdmv_run_graphics(bd, GC_CTRL_DISABLE_BUTTON, hev->param);
             break;
 
         case HDMV_EVENT_SET_BUTTON_PAGE:
-            _run_gc(bd, GC_CTRL_SET_BUTTON_PAGE, hev->param);
+            _hdmv_run_graphics(bd, GC_CTRL_SET_BUTTON_PAGE, hev->param);
             break;
 
         case HDMV_EVENT_POPUP_OFF:
-            _run_gc(bd, GC_CTRL_POPUP, 0);
+            _hdmv_run_graphics(bd, GC_CTRL_POPUP, 0);
             break;
 
         case HDMV_EVENT_IG_END:
-            _run_gc(bd, GC_CTRL_IG_END, 0);
+            _hdmv_run_graphics(bd, GC_CTRL_IG_END, 0);
             break;
 
         case HDMV_EVENT_END:
@@ -4236,7 +4362,7 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
             }
         }
 
-        if (bd->gc_status & GC_STATUS_ANIMATE) {
+        if ((bd->gc_status & GC_STATUS_ANIMATE) && !bd->hdmv_ig_count) {
             _run_gc(bd, GC_CTRL_NOP, 0);
         }
     }
@@ -4266,6 +4392,8 @@ static int _read_ext(BLURAY *bd, unsigned char *buf, int len, BD_EVENT *event)
     }
 
     int bytes = _bd_read_locked(bd, buf, len, bd->event_queue != NULL);
+    if (bytes > 0 && _hold_hdmv_graphics(bd))
+        bd->hdmv_ig_read = 1;
 
     /* Queue the BD-J end before the player receives EOF and drains its decoders. */
     if (_bdj_pt_active(bd) && bd->end_of_playlist == 1) {
@@ -4338,9 +4466,28 @@ static void _resume_hdmv_end(BLURAY *bd)
 {
     if (bd->hdmv_end_pending && bd->title_type == title_hdmv) {
         bd->hdmv_end_pending = 0;
-        hdmv_vm_resume(bd->hdmv_vm);
+        _hdmv_release_graphics(bd, INT64_MAX);
+        if (!hdmv_vm_running(bd->hdmv_vm))
+            hdmv_vm_resume(bd->hdmv_vm);
         bd->hdmv_suspended = !hdmv_vm_running(bd->hdmv_vm);
     }
+}
+
+void bd_hdmv_set_graphics_hold(BLURAY *bd, int enable)
+{
+    bd_mutex_lock(&bd->mutex);
+    if (!enable && _hold_hdmv_graphics(bd))
+        _hdmv_release_graphics(bd, INT64_MAX);
+    bd->hdmv_hold_graphics = !!enable;
+    bd_mutex_unlock(&bd->mutex);
+}
+
+void bd_hdmv_presented(BLURAY *bd, uint32_t epoch, int64_t title_time)
+{
+    bd_mutex_lock(&bd->mutex);
+    if (_hold_hdmv_graphics(bd) && bd->hdmv_ig_read && epoch == bd->bdj_pt_clock_epoch)
+        _hdmv_release_graphics(bd, title_time);
+    bd_mutex_unlock(&bd->mutex);
 }
 
 void bd_hdmv_set_end_hold(BLURAY *bd, int enable)
@@ -4508,6 +4655,11 @@ int bd_mouse_select(BLURAY *bd, int64_t pts, uint16_t x, uint16_t y)
     _set_scr(bd, pts);
 
     if (bd->title_type == title_hdmv) {
+        if (_hold_hdmv_graphics(bd) && bd->hdmv_ig_count &&
+            _hdmv_release_graphics(bd, INT64_MAX)) {
+            bd_mutex_unlock(&bd->mutex);
+            return 1;
+        }
         result = _run_gc(bd, GC_CTRL_MOUSE_MOVE, param);
     } else if (bd->title_type == title_bdj) {
         result = _bdj_event(bd, BDJ_EVENT_MOUSE, param);
@@ -4581,6 +4733,11 @@ int bd_user_input(BLURAY *bd, int64_t pts, uint32_t key)
     bd_mutex_lock(&bd->mutex);
 
     _set_scr(bd, pts);
+    if (_hold_hdmv_graphics(bd) && bd->hdmv_ig_count &&
+        _hdmv_release_graphics(bd, INT64_MAX)) {
+        bd_mutex_unlock(&bd->mutex);
+        return 1;
+    }
     if (_get_key_uo_index(bd, BD_VK_KEY(key), &uo_mask_idx)) {
         uo_is_masked = _is_uo_masked(bd, uo_mask_idx);
     }
