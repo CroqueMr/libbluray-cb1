@@ -110,6 +110,10 @@ public abstract class HScreenConfigTemplate {
             if (supported)
                 return -1;
             return 1;
+        } else if (Priority == PREFERRED) {
+            return supported ? 1 : 0;
+        } else if (Priority == PREFERRED_NOT) {
+            return supported ? 0 : 1;
         }
         return 0;
     }
