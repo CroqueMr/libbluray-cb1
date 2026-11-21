@@ -586,8 +586,13 @@ static void _updateGraphic(JNIEnv * env,
             BD_DEBUG(DBG_BDJ | DBG_CRIT, "Array access error at %ld (+%ld)\n", (long)offset, (long)(x1 - x0 + 1));
             (*env)->ExceptionDescribe(env);
             (*env)->ExceptionClear(env);
+            if (buf->unlock) {
+                buf->unlock(buf);
+            }
+            return;
         }
 
+        bdpriv_bdj_report_graphics(bd, buf->buf[BD_OVERLAY_IG], width, height, x0, y0, x1, y1);
         if (buf->unlock) {
             buf->unlock(buf);
         }
@@ -601,6 +606,7 @@ static void _updateGraphic(JNIEnv * env,
 
         jint *image = (jint *)(*env)->GetPrimitiveArrayCritical(env, rgbArray, NULL);
         if (image) {
+            bdpriv_bdj_report_graphics(bd, (const unsigned *)image, width, height, x0, y0, x1, y1);
             bdpriv_bdj_osd_cb(bd, (const unsigned *)image, (int)width, (int)height,
                           x0, y0, x1, y1);
             (*env)->ReleasePrimitiveArrayCritical(env, rgbArray, image, JNI_ABORT);
@@ -623,8 +629,10 @@ JNIEXPORT void JNICALL Java_org_videolan_Libbluray_updateGraphicN(JNIEnv * env,
         return;
     }
 
-    /* nothing to draw ? */
-    if (rgbArray && (x1 < x0 || y1 < y0 || (x1 | y1) < 0)) {
+    if (rgbArray &&
+        (width <= 0 || height <= 0 || width > UINT16_MAX || height > UINT16_MAX ||
+         x0 < 0 || y0 < 0 || x1 < x0 || y1 < y0 || x1 >= width || y1 >= height ||
+         (uint64_t)width * height > (uint64_t)(*env)->GetArrayLength(env, rgbArray))) {
         return;
     }
 

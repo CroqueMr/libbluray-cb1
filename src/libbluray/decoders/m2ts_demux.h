@@ -39,10 +39,11 @@ BD_PRIVATE void m2ts_demux_reset(M2TS_DEMUX *);
 /*
  *   Demux aligned unit (mpeg-ts + pes).
  *   input:  aligned unit (6144 bytes). NULL to flush demuxer buffer.
+ *           src is stored with each PES that starts in the unit.
  *   output: PES payload
  *   Flush demuxer internal cache if block == NULL.
  */
-BD_PRIVATE struct pes_buffer_s *m2ts_demux(M2TS_DEMUX *, uint8_t *block);
+BD_PRIVATE struct pes_buffer_s *m2ts_demux(M2TS_DEMUX *, uint8_t *block, unsigned src);
 
 
 #endif // _M2TS_DEMUX_H_
